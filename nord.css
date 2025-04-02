@@ -1,0 +1,442 @@
+:root {
+            --nord-text-color: #d8dee9;          /* Основной текст - светло-серый с голубым */
+            --nord-text2-color: #d8dee9;         /* Вторичный текст - светло-серый с голубым */
+            --nord-background-color: #2e3440;    /* Фон - холодный тёмно-серый */
+            --nord-link-color: #81a1c1;          /* Ссылки - голубой */
+            --nord-modal-background: #3b4252;    /* Модальные окна - чуть светлее фон */
+            --nord-checkbox-background-color: #434c5e; /* Чекбоксы - серо-синий */
+            --nord-active-checkbox-background-color: #88c0d0; /* Активные чекбоксы - бирюзовый */
+            --nord-disabled-checkbox-background-color: #434c5e; /* Неактивные чекбоксы - серо-синий */
+            --nord-checkbox-border-color: #81a1c1; /* Границы чекбоксов - голубой */
+            --nord-active-checkbox-border-color: #2e3440; /* Активные границы - тёмный фон */
+            --nord-disabled-checkbox-border-color: #434c5e; /* Неактивные границы - серо-синий */
+            --nord-button-scan-color: #a3be8c;   /* Кнопка сканирования - зелёный */
+            --nord-button-stop-color: #bf616a;   /* Кнопка остановки - красный */
+            --nord-button-stop-talk-color: #88c0d0; /* Кнопка остановки разговора - бирюзовый */
+            --nord-button-continue-color: #81a1c1; /* Кнопка продолжения - голубой */
+            --nord-button-got-color: #a3be8c;    /* Кнопка "понял" - зелёный */
+            --nord-body-background: url('https://i.imgur.com/rhVpS73.png'); /* Оставил твой фон */
+            --nord-header-background-color: #3b4252; /* Шапка - чуть светлее фон */
+            --nord-header-text-color: #d8dee9;   /* Текст шапки - светло-серый с голубым */
+            --nord-header-border-color: #81a1c1; /* Граница шапки - голубой */
+            --nord-active-talk-color: #2e3440;   /* Активный разговор - тёмный фон */
+            --nord-active-talk-status-messages-color: #2e3440; /* Статус сообщений - тёмный фон */
+            --nord-danger-color: #bf616a;        /* Опасность - красный */
+            --nord-stop-talk-confirm-background: #3b4252; /* Фон подтверждения - чуть светлее */
+            --pastel-text-color: #ebcb8b;        /* Дополнительный текст - жёлтый */
+        }
+
+        .navbar.navbar-inverse.navbar-fixed-top,
+        .hidden-xs, .hidden-sm, .col-sm-1, .col-md-4, .col-lg-3,
+        .night_theme .audio-chat .description,
+        .night_theme .audio-chat .join,
+        .night_theme .audio-chat div > a[href*="play.google.com"],
+        .night_theme .audio-chat div > a[href*="nekto.me/ios-chat-ruletka"],
+        .night_theme .audio-chat h1.chat,
+        .night_theme .audio-chat .companion-label,
+        .night_theme .audio-chat span.chat {
+            display: none !important;
+        }
+
+        /* Исправление 1: Скрытие текста в <div style=""><h1 class="chat"> */
+        .night_theme .audio-chat div > h1.chat,
+        .night_theme .audio-chat div[style*=""] > h1.chat,
+        .night_theme .audio-chat div[style=""] > h1.chat {
+            display: none !important;
+        }
+
+        /* Исправление 2: Добавление промежутка между talking и main-panel */
+        .night_theme .audio-chat .talking {
+            display: inline-block !important;
+            font-size: 20px !important;
+            font-weight: bold !important;
+            color: #d8dee9 !important;           /* Текст - светло-серый с голубым */
+            background: linear-gradient(135deg, rgba(129, 161, 193, 0.9), rgba(136, 192, 208, 0.9)) !important; /* Градиент голубой-бирюзовый */
+            padding: 10px 25px !important;
+            border-radius: 14px !important;
+            box-shadow: 0 0 12px rgba(136, 192, 208, 0.6) !important; /* Тень с бирюзовым */
+            position: absolute !important;
+            top: 15px !important;
+            left: 50% !important;
+            transform: translateX(-50%) !important;
+            z-index: 1000 !important;
+            margin-bottom: 20px !important; /* Промежуток снизу */
+        }
+        .night_theme .audio-chat .talking .talking-count {
+            display: inline !important;
+            margin-right: 8px !important;
+            font-size: 20px !important;
+            color: #d8dee9 !important;           /* Текст - светло-серый с голубым */
+            background: none !important;
+            padding: 0 !important;
+        }
+
+        .night_theme .audio-chat .header.header_chat {
+            display: flex !important;
+            justify-content: center !important;
+            align-items: center !important;
+            background: var(--nord-header-background-color) !important;
+            border-color: var(--nord-header-border-color) !important;
+            padding: 4px 10px !important;
+            position: relative !important;
+        }
+        .night_theme .audio-chat .header.header_chat span {
+            color: var(--nord-header-text-color) !important;
+        }
+
+        body.night_theme {
+            background: var(--nord-body-background) !important;
+        }
+
+        .night_theme .adv-block {
+            color: var(--nord-text-color) !important;
+        }
+        .night_theme .adv-block a {
+            color: var(--nord-link-color) !important;
+        }
+        .night_theme .advBox {
+            background: var(--nord-background-color) !important;
+        }
+        .night_theme #audio-chat-container div.mask_error {
+            background: var(--nord-background-color) !important;
+            color: var(--nord-text-color) !important;
+        }
+        .night_theme .tabs_type_chats div:last-child {
+            background: var(--nord-background-color) !important;
+            color: var(--nord-text-color) !important;
+        }
+        .night_theme .chat_container .audio-chat,
+        .night_theme .chat_container .audio-chat > div {
+            background: var(--nord-background-color) !important;
+            color: var(--nord-text-color) !important;
+        }
+
+        .night_theme .audio-chat .filter-label {
+            color: var(--nord-text-color) !important;
+        }
+        .night_theme .audio-chat .talk-label,
+        .night_theme .audio-chat .timer-label {
+            color: var(--pastel-text-color) !important;
+        }
+        .night_theme .audio-chat .users-count-panel,
+        .night_theme .audio-chat .loading {
+            color: #d8dee9 !important;           /* Светло-серый с голубым */
+        }
+        .night_theme .audio-chat .complain-button {
+            color: #d8dee9 !important;           /* Светло-серый с голубым */
+            border-bottom: 1px dotted var(--nord-danger-color) !important;
+        }
+
+        .night_theme .audio-chat .btn,
+        .night_theme .audio-chat .btn-default,
+        .night_theme .audio-chat .btn-default.checked,
+        .night_theme .audio-chat .mute-button,
+        .night_theme .audio-chat .stop-talk-button {
+            border-color: #2e3440 !important;    /* Тёмный фон для границ */
+            outline: none !important;
+        }
+        .night_theme .audio-chat .btn:focus,
+        .night_theme .audio-chat .btn:active {
+            box-shadow: none !important;
+        }
+
+        .night_theme .audio-chat .btn-default {
+            background: var(--nord-checkbox-background-color) !important;
+            border-color: #2e3440 !important;    /* Тёмный фон для границ */
+            color: #d8dee9 !important;          /* Светло-серый с голубым */
+            text-align: center !important;
+        }
+        .night_theme .audio-chat .btn-default.checked {
+            background: var(--nord-active-checkbox-background-color) !important;
+            border-color: #2e3440 !important;    /* Тёмный фон для границ */
+            color: #d8dee9 !important;          /* Светло-серый с голубым */
+            text-align: center !important;
+        }
+        .night_theme .audio-chat .btn-default.disabled:not(.checked) {
+            background: var(--nord-disabled-checkbox-background-color) !important;
+            border-color: #2e3440 !important;    /* Тёмный фон для границ */
+            color: #d8dee9 !important;          /* Светло-серый с голубым */
+            text-align: center !important;
+        }
+
+        .night_theme .audio-chat .scan-button,
+        .night_theme .audio-chat .go-scan-button {
+            background-image: none !important;
+            background-color: #a3be8c !important; /* Зелёный */
+            color: #2e3440 !important;           /* Тёмный текст */
+            font-size: 18px !important;
+            font-weight: bold !important;
+            text-align: center !important;
+            padding: 12px 30px !important;
+            border-radius: 8px !important;
+            border: 2px solid #2e3440 !important; /* Тёмная граница */
+        }
+        .night_theme .audio-chat .scan-button:hover,
+        .night_theme .audio-chat .go-scan-button:hover {
+            background-color: #81a1c1 !important; /* Голубой при наведении */
+        }
+
+        .night_theme .audio-chat .go-idle-button {
+            background-image: none !important;
+            background-color: #bf616a !important; /* Красный */
+            color: #d8dee9 !important;          /* Светло-серый с голубым */
+            font-size: 18px !important;
+            font-weight: bold !important;
+            text-align: center !important;
+            padding: 12px 30px !important;
+            border-radius: 8px !important;
+            border: 2px solid #2e3440 !important; /* Тёмная граница */
+        }
+        .night_theme .audio-chat .buttons-panel {
+            display: flex !important;
+            justify-content: center !important;
+            align-items: center !important;
+            gap: 20px !important;
+            padding: 20px 0 !important;
+        }
+        .night_theme .audio-chat .stop-talk-button,
+        .night_theme .audio-chat .mute-button {
+            background-image: none !important;
+            background-color: #88c0d0 !important; /* Бирюзовый */
+            color: #2e3440 !important;          /* Тёмный текст */
+            font-size: 18px !important;
+            font-weight: bold !important;
+            text-align: center !important;
+            padding: 12px 30px !important;
+            border-radius: 8px !important;
+            border: 2px solid #2e3440 !important; /* Тёмная граница */
+            min-width: 140px !important;
+            height: 48px !important;
+            line-height: 24px !important;
+        }
+        .night_theme .audio-chat .stop-talk-button:hover,
+        .night_theme .audio-chat .mute-button:hover {
+            background-color: #81a1c1 !important; /* Голубой при наведении */
+        }
+
+        .night_theme .audio-chat .stop-and-complain-button,
+        .night_theme .audio-chat .cache_muted_button,
+        .night_theme .audio-chat .mute-toast {
+            display: none !important;
+        }
+
+        .night_theme .audio-chat .volume_slider {
+            width: 70px !important;
+            height: 30px !important;
+            margin: 0 auto !important;
+            vertical-align: middle !important;
+            overflow: visible !important;
+            background: none !important;
+            transform: translateY(8px) !important;
+            display: block !important;
+        }
+        .night_theme .audio-chat .volume_slider::after {
+            display: none !important;
+            content: none !important;
+        }
+        .night_theme .audio-chat .vue-range-slider.slider-component.slider-horizontal {
+            width: 70px !important;
+            padding: 5px 0 !important;
+            display: block !important;
+            margin: 0 auto !important;
+        }
+        .night_theme .audio-chat .volume_slider .slider {
+            height: 4px !important;
+            background: #434c5e !important;      /* Серо-синий */
+            border-radius: 2px !important;
+        }
+        .night_theme .audio-chat .volume_slider .slider-dot {
+            width: 10px !important;
+            height: 10px !important;
+            top: -3px !important;
+            background: #88c0d0 !important;      /* Бирюзовый */
+            border-radius: 50% !important;
+            box-shadow: 0 0 5px rgba(136, 192, 208, 0.8) !important; /* Тень бирюзовая */
+        }
+        .night_theme .audio-chat .volume_slider .slider-process {
+            height: 4px !important;
+            background: #81a1c1 !important;      /* Голубой */
+            border-radius: 2px !important;
+        }
+        .night_theme .audio-chat .volume_slider .slider-tooltip {
+            font-size: 12px !important;
+            color: #d8dee9 !important;          /* Светло-серый с голубым */
+            background: #3b4252 !important;      /* Тёмный фон */
+            padding: 2px 6px !important;
+            border-radius: 3px !important;
+        }
+        .night_theme .audio-chat .volume_slider .merged-tooltip {
+            display: none !important;
+        }
+        .night_theme .audio-chat .volume_slider .slider-piecewise {
+            display: none !important;
+        }
+        .night_theme .audio-chat .volume_slider input[type="range"] {
+            display: none !important;
+        }
+
+        .night_theme .audio-chat .nekto {
+            background-color: #81a1c1 !important; /* Голубой вместо фиксированного красного */
+            color: #2e3440 !important;           /* Тёмный текст */
+        }
+        .night_theme .audio-chat .nekto:after {
+            border-color: #2e3440 !important;    /* Тёмная граница */
+        }
+
+        .night_theme .audio-chat .peer-problem-label {
+            color: var(--nord-danger-color) !important;
+        }
+        .night_theme .popup-panel {
+            background: var(--nord-stop-talk-confirm-background) !important;
+        }
+        .night_theme .popup-content .question {
+            color: var(--nord-text2-color) !important;
+            border-color: var(--nord-text2-color) !important;
+        }
+        .night_theme .popup-content .title,
+        .night_theme .audio-chat .content {
+            color: #d8dee9 !important;          /* Светло-серый с голубым */
+        }
+        .night_theme .popup-content .btn.cancel {
+            background-color: #434c5e !important; /* Серо-синий */
+            color: #d8dee9 !important;          /* Светло-серый с голубым */
+            border: 2px solid #2e3440 !important; /* Тёмная граница */
+            text-align: center !important;
+        }
+        .night_theme .popup-content .btn.cancel:hover {
+            background-color: #81a1c1 !important; /* Голубой при наведении */
+        }
+        .night_theme .popup-content .btn.finish {
+            background-color: #88c0d0 !important; /* Бирюзовый */
+            color: #2e3440 !important;          /* Тёмный текст */
+            border: 2px solid #2e3440 !important; /* Тёмная граница */
+            text-align: center !important;
+        }
+        .night_theme .popup-content .btn.finish:hover {
+            background-color: #81a1c1 !important; /* Голубой при наведении */
+        }
+        .night_theme .audio-chat .hangup .talk-label {
+            color: var(--pastel-text-color) !important;
+        }
+        .night_theme .audio-chat .hangup .complain-button {
+            color: #d8dee9 !important;          /* Светло-серый с голубым */
+        }
+        .night_theme .swal2-modal {
+            background-color: #3b4252 !important; /* Тёмный фон модалок */
+        }
+        .night_theme .swal2-validation-message {
+            background-color: #3b4252 !important; /* Тёмный фон сообщений */
+        }
+        .night_theme .swal2-modal .swal2-content ul li,
+        .night_theme .swal2-modal .swal2-content div,
+        .night_theme .swal2-modal .swal2-title {
+            color: #d8dee9 !important;          /* Светло-серый с голубым */
+        }
+        .night_theme .swal2-modal.swal2-popup .swal2-actions:not(.swal2-loading) .swal2-styled.swal2-confirm {
+            background-color: #88c0d0 !important; /* Бирюзовый */
+            color: #2e3440 !important;          /* Тёмный текст */
+            border: 2px solid #2e3440 !important; /* Тёмная граница */
+            text-align: center !important;
+        }
+        .night_theme .banPopup.swal2-modal.swal2-popup .swal2-actions:not(.swal2-loading) .swal2-styled.swal2-confirm {
+            background-color: #a3be8c !important; /* Зелёный */
+            color: #2e3440 !important;          /* Тёмный текст */
+            border: 2px solid #2e3440 !important; /* Тёмная граница */
+            text-align: center !important;
+        }
+        .night_theme .swal2-modal .swal2-actions:not(.swal2-loading) .swal2-confirm:hover,
+        .night_theme .swal2-modal .swal2-actions .swal2-cancel:hover {
+            background-color: #81a1c1 !important; /* Голубой при наведении */
+        }
+        .night_theme .swal2-modal .swal2-actions .swal2-cancel {
+            background-color: #88c0d0 !important; /* Бирюзовый */
+            color: #2e3440 !important;          /* Тёмный текст */
+            border: 2px solid #2e3440 !important; /* Тёмная граница */
+            text-align: center !important;
+        }
+        .audio-chat .sex-filter-panel, .audio-chat .age-filter-panel, .audio-chat .theme-filter-panel {
+            width: 100%;
+            margin-top: 50px;
+        }
+        .header_chat h1.chat,
+        .header_chat > div:first-child span.chat {
+            visibility: hidden;
+        }
+        .header_chat > div:last-child {
+            color: transparent;
+            font-size: 0;
+        }
+        .night_theme .audio-chat .stop-scan-button, .night_theme .audio-chat .go-idle-button {
+            background-color: transparent;
+            color: #d8dee9 !important;          /* Светло-серый с голубым */
+            border-color: var(--nord-button-stop-color);
+            border-width: 2px;
+        }
+        .night_theme .audio-chat .btn,
+        .night_theme .audio-chat .btn-default,
+        .night_theme .audio-chat .btn-default.checked,
+        .night_theme .audio-chat .mute-button,
+        .night_theme .audio-chat .stop-talk-button {
+            border-color: #2e3440 !important;    /* Тёмная граница */
+            outline: none !important;
+            font-size: 18px !important;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 10px 15px;
+            text-align: center;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            box-sizing: border-box;
+        }
+        .night_theme .audio-chat .go-idle-button:hover {
+            background-color: #a3be8c !important; /* Зелёный при наведении */
+        }
+
+        .night_theme .audio-chat .mute-button {
+            border-color: #2e3440 !important;    /* Тёмная граница */
+            outline: none !important;
+            font-size: 18px !important;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 10px 15px;
+            text-align: center;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            box-sizing: border-box;
+            min-width: 120px;
+            height: 40px;
+            position: relative;
+        }
+
+        .night_theme .audio-chat .mute-button {
+            position: relative;
+            border-color: #2e3440 !important;    /* Тёмная граница */
+            outline: none !important;
+            font-size: 18px !important;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 10px 15px;
+            height: 40px;
+            min-width: 140px;
+            overflow: hidden;
+        }
+
+        .night_theme .audio-chat .mute-button::after {
+            content: "Микро Вкл" !important;
+            font-size: 18px !important;
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            white-space: nowrap;
+        }
+
+        /* Состояние "выключено" */
+        .night_theme .audio-chat .mute-button.muted::after {
+            content: "Микро Выкл" !important;
+        }
