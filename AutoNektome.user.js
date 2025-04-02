@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AutoNektome
 // @namespace    http://tampermonkey.net/
-// @version      3.0
-// @description  Автоматический переход с настройками звука, голосовым управлением, улучшенной автогромкостью и изменением голоса для nekto.me audiochat
+// @version      4.0
+// @description  Автоматический переход с настройками звука, голосовым управлением, улучшенной автогромкостью, изменением голоса и выбором тем для nekto.me audiochat
 // @author       @paracosm17
 // @match        https://nekto.me/audiochat
 // @grant        none
@@ -15,7 +15,7 @@
     'use strict';
 
     // ### Константы
-    const NOTIFICATION_SOUND_URL = 'https://free-sound-effects.net/mp3/03/free-sound-1674971986.mp3';
+    const NOTIFICATION_SOUND_URL = 'https://www.myinstants.com/media/sounds/pi-de-palavrao-da-tv-08112013.mp3';
     const VOICE_COMMANDS = {
         skip: ['скип', 'skip', 'скиф', 'скипнуть', 'кофе', 'кефир', 'дальше'],
         stop: ['завершить', 'остановить', 'закончить', 'кумыс'],
@@ -30,6 +30,16 @@
     const SILENCE_THRESHOLD = 5;
     const HISTORY_SIZE = 15;
 
+    // ### Темы
+    const THEMES = {
+        'Original': null,
+        'Dracula': 'https://raw.githubusercontent.com/paracosm17/AutoNektome/refs/heads/main/dracula.css',
+        'GitHub Dark': 'https://raw.githubusercontent.com/paracosm17/AutoNektome/refs/heads/main/githubdark.css',
+        'One Dark': 'https://raw.githubusercontent.com/paracosm17/AutoNektome/refs/heads/main/onedark.css',
+        'Monokai': 'https://raw.githubusercontent.com/paracosm17/AutoNektome/refs/heads/main/monokai.css',
+        'Nord': 'https://raw.githubusercontent.com/paracosm17/AutoNektome/refs/heads/main/nord.css'
+    };
+
     // ### Настройки из localStorage
     const settings = {
         enableLoopback: loadSetting('enableLoopback', false),
@@ -40,7 +50,18 @@
         voiceControl: loadSetting('voiceControl', false),
         autoVolume: loadSetting('autoVolume', true),
         voicePitch: loadSetting('voicePitch', false),
-        pitchLevel: loadSetting('pitchLevel', 0, parseFloat)
+        pitchLevel: loadSetting('pitchLevel', 0, parseFloat),
+        conversationCount: loadSetting('conversationCount', 0, parseInt),
+        conversationStats: loadSetting('conversationStats', {
+            over5min: 0,
+            over15min: 0,
+            over30min: 0,
+            over1hour: 0,
+            over2hours: 0,
+            over3hours: 0,
+            over5hours: 0
+        }),
+        selectedTheme: loadSetting('selectedTheme', 'Original')
     };
 
     // ### Переменные состояния
@@ -63,6 +84,12 @@
     let pitchAudioContext = null;
     let pitchSource = null;
     let pitchWorkletNode = null;
+    let conversationTimer = null;
+    let currentConversationStart = null;
+    let isConversationActive = false;
+    let isMicMuted = false;
+    let isHeadphonesMuted = false;
+    let currentThemeLink = null;
 
     // ### Утилиты
     const notificationAudio = new Audio(NOTIFICATION_SOUND_URL);
@@ -71,6 +98,119 @@
     function loadSetting(key, defaultValue, transform = JSON.parse) {
         const value = localStorage.getItem(key);
         return value !== null ? transform(value) : defaultValue;
+    }
+
+    function saveSetting(key, value) {
+        localStorage.setItem(key, JSON.stringify(value));
+    }
+
+    // ### Управление темами
+function applyTheme(themeName) {
+    if (currentThemeLink) {
+        currentThemeLink.remove();
+        currentThemeLink = null;
+    }
+
+    const loadingIndicator = document.querySelector('#settings-container select + span + span');
+    if (loadingIndicator) loadingIndicator.style.display = 'block';
+
+    if (themeName !== 'Original' && THEMES[themeName]) {
+        const styleElement = document.createElement('style');
+        styleElement.id = 'custom-theme-style';
+
+        fetch(THEMES[themeName])
+            .then(response => {
+                if (!response.ok) throw new Error('Ошибка загрузки CSS');
+                return response.text();
+            })
+            .then(css => {
+                styleElement.textContent = css;
+                document.head.appendChild(styleElement);
+                currentThemeLink = styleElement;
+                if (loadingIndicator) loadingIndicator.style.display = 'none';
+            })
+            .catch(error => {
+                console.error('Ошибка при загрузке темы:', error);
+                if (loadingIndicator) loadingIndicator.style.display = 'none';
+            });
+    } else if (themeName === 'Original') {
+        const existingStyles = document.querySelectorAll('style[id="custom-theme-style"]');
+        existingStyles.forEach(style => style.remove());
+        currentThemeLink = null;
+        if (loadingIndicator) loadingIndicator.style.display = 'none';
+    }
+
+    settings.selectedTheme = themeName;
+    saveSetting('selectedTheme', themeName);
+}
+
+    function createThemeSelector() {
+        const themeContainer = document.createElement('div');
+        themeContainer.style.marginTop = '20px';
+
+        const themeLabel = document.createElement('span');
+        themeLabel.textContent = 'Тема оформления';
+        themeLabel.style.fontSize = '14px';
+        themeLabel.style.color = '#fff';
+        themeLabel.style.fontWeight = 'bold';
+        themeLabel.style.textShadow = '0 0 3px rgba(255,255,255,0.5)';
+        themeLabel.style.display = 'block';
+        themeLabel.style.marginBottom = '8px';
+
+        const selectWrapper = document.createElement('div');
+        selectWrapper.style.position = 'relative';
+        selectWrapper.style.width = '100%';
+
+        const select = document.createElement('select');
+        select.style.width = '100%';
+        select.style.padding = '8px 25px 8px 10px';
+        select.style.background = '#2b2b2b';
+        select.style.color = '#fff';
+        select.style.border = '1px solid #ff007a';
+        select.style.borderRadius = '8px';
+        select.style.fontSize = '14px';
+        select.style.cursor = 'pointer';
+        select.style.appearance = 'none';
+        select.style.outline = 'none';
+        select.style.transition = 'border-color 0.3s ease';
+
+        for (const themeName in THEMES) {
+            const option = document.createElement('option');
+            option.value = themeName;
+            option.textContent = themeName;
+            if (themeName === settings.selectedTheme) {
+                option.selected = true;
+            }
+            select.appendChild(option);
+        }
+
+        const arrow = document.createElement('span');
+        arrow.textContent = '▼';
+        arrow.style.position = 'absolute';
+        arrow.style.right = '10px';
+        arrow.style.top = '50%';
+        arrow.style.transform = 'translateY(-50%)';
+        arrow.style.color = '#ff007a';
+        arrow.style.pointerEvents = 'none';
+
+        selectWrapper.appendChild(select);
+        selectWrapper.appendChild(arrow);
+        themeContainer.appendChild(themeLabel);
+        themeContainer.appendChild(selectWrapper);
+
+        select.addEventListener('change', (e) => {
+            const selectedTheme = e.target.value;
+            applyTheme(selectedTheme);
+        });
+
+        select.addEventListener('mouseover', () => {
+            select.style.borderColor = '#00ff9d';
+        });
+        select.addEventListener('mouseout', () => {
+            select.style.borderColor = '#ff007a';
+        });
+
+        return themeContainer;
     }
 
     // ### AudioWorklet процессор для pitch shifting
@@ -120,7 +260,6 @@
         if (!isAutoModeEnabled) return;
         const button = document.querySelector('button.btn.btn-lg.go-scan-button');
         if (button) {
-            notificationAudio.play();
             button.click();
         }
     }
@@ -131,9 +270,18 @@
             stopButton.click();
             setTimeout(() => {
                 const confirmButton = document.querySelector('button.swal2-confirm.swal2-styled');
-                if (confirmButton) confirmButton.click();
+                if (confirmButton) {
+                    confirmButton.click();
+                    playNotificationOnEnd();
+                }
             }, 500);
+        }
+    }
+
+    function playNotificationOnEnd() {
+        if (isConversationActive) {
             notificationAudio.play();
+            isConversationActive = false;
         }
     }
 
@@ -170,7 +318,6 @@
         }
         updateSliderStyles(enable);
         applyCustomStyles(enable);
-        if (!enable) skipConversation();
     }
 
     // ### Аудио функции
@@ -219,13 +366,12 @@
         const outputNode = pitchAudioContext.createGain();
 
         if (settings.voicePitch && settings.pitchLevel > 0) {
-            // Регистрируем AudioWorklet процессор
             const blob = new Blob([pitchShiftWorkletCode], { type: 'application/javascript' });
             const url = URL.createObjectURL(blob);
             await pitchAudioContext.audioWorklet.addModule(url);
 
             pitchWorkletNode = new AudioWorkletNode(pitchAudioContext, 'pitch-shift-processor');
-            const pitchShiftFactor = 1.0 - settings.pitchLevel; // 0 -> 1.0, 0.4 -> 0.6
+            const pitchShiftFactor = 1.0 - settings.pitchLevel;
             pitchWorkletNode.port.postMessage(pitchShiftFactor);
 
             pitchNode = pitchAudioContext.createBiquadFilter();
@@ -378,9 +524,12 @@
         recognition.onresult = (event) => {
             if (!isVoiceControlEnabled) return;
             const transcript = event.results[event.results.length - 1][0].transcript.trim().toLowerCase();
-            if (VOICE_COMMANDS.skip.some(cmd => transcript.includes(cmd))) skipConversation();
-            else if (VOICE_COMMANDS.stop.some(cmd => transcript.includes(cmd))) toggleAutoMode(false);
-            else if (VOICE_COMMANDS.start.some(cmd => transcript.includes(cmd))) {
+            if (VOICE_COMMANDS.skip.some(cmd => transcript.includes(cmd))) {
+                skipConversation();
+            } else if (VOICE_COMMANDS.stop.some(cmd => transcript.includes(cmd))) {
+                toggleAutoMode(false);
+                skipConversation();
+            } else if (VOICE_COMMANDS.start.some(cmd => transcript.includes(cmd))) {
                 toggleAutoMode(true);
                 checkAndClickButton();
             }
@@ -406,6 +555,90 @@
             }, 10000);
         }
     }
+
+    // ### Счетчик разговоров
+    function updateConversationStats(duration) {
+        settings.conversationCount++;
+        if (duration >= 300) settings.conversationStats.over5min++;
+        if (duration >= 900) settings.conversationStats.over15min++;
+        if (duration >= 1800) settings.conversationStats.over30min++;
+        if (duration >= 3600) settings.conversationStats.over1hour++;
+        if (duration >= 7200) settings.conversationStats.over2hours++;
+        if (duration >= 10800) settings.conversationStats.over3hours++;
+        if (duration >= 18000) settings.conversationStats.over5hours++;
+
+        saveSetting('conversationCount', settings.conversationCount);
+        saveSetting('conversationStats', settings.conversationStats);
+
+        const counter = document.querySelector('#conversation-counter span');
+        if (counter) counter.textContent = `Разговоров: ${settings.conversationCount}`;
+    }
+
+    function startConversationTimer() {
+        if (conversationTimer) clearInterval(conversationTimer);
+        currentConversationStart = Date.now();
+        isConversationActive = true;
+        conversationTimer = setInterval(() => {
+            const timerElement = document.querySelector('.timer-label');
+            if (!timerElement || timerElement.textContent === '00:00') {
+                stopConversationTimer();
+            }
+        }, 1000);
+    }
+
+    function stopConversationTimer() {
+        if (conversationTimer && currentConversationStart) {
+            clearInterval(conversationTimer);
+            const duration = Math.floor((Date.now() - currentConversationStart) / 1000);
+            updateConversationStats(duration);
+            playNotificationOnEnd();
+            conversationTimer = null;
+            currentConversationStart = null;
+        }
+    }
+
+    // ### Новые функции для управления микрофоном и наушниками
+    function toggleMic() {
+        isMicMuted = !isMicMuted;
+        if (globalStream) {
+            globalStream.getAudioTracks().forEach(track => {
+                track.enabled = !isMicMuted;
+            });
+        }
+        updateButtonStyles();
+    }
+
+    function toggleHeadphones() {
+        isHeadphonesMuted = !isHeadphonesMuted;
+        const audio = document.querySelector('audio#audioStream');
+        if (audio) {
+            audio.muted = isHeadphonesMuted;
+        }
+        if (isHeadphonesMuted && !isMicMuted) {
+            toggleMic(); // Выключение наушников мутит микрофон
+        }
+        updateButtonStyles();
+    }
+
+function updateButtonStyles() {
+    const micButton = document.querySelector('#mic-toggle');
+    const headphoneButton = document.querySelector('#headphone-toggle');
+
+    if (micButton) {
+        // Проверяем реальное состояние треков, если globalStream доступен
+        const micState = globalStream && globalStream.getAudioTracks().length > 0 ? !globalStream.getAudioTracks()[0].enabled : isMicMuted;
+        isMicMuted = micState; // Синхронизируем переменную с реальным состоянием
+        micButton.style.background = isMicMuted ? '#ff4d4d' : '#00ff9d';
+        micButton.style.textDecoration = isMicMuted ? 'line-through' : 'none';
+        micButton.style.boxShadow = `0 0 10px ${isMicMuted ? '#ff4d4d' : '#00ff9d'}`;
+    }
+
+    if (headphoneButton) {
+        headphoneButton.style.background = isHeadphonesMuted ? '#ff4d4d' : '#00ff9d';
+        headphoneButton.style.textDecoration = isHeadphonesMuted ? 'line-through' : 'none';
+        headphoneButton.style.boxShadow = `0 0 10px ${isHeadphonesMuted ? '#ff4d4d' : '#00ff9d'}`;
+    }
+}
 
     // ### UI элементы
     function createVoiceHints() {
@@ -438,8 +671,79 @@
         return wrapper;
     }
 
+    function createConversationCounter() {
+        const counterDiv = document.createElement('div');
+        counterDiv.id = 'conversation-counter';
+        counterDiv.style.cssText = `
+            margin-bottom: 15px;
+            text-align: center;
+            position: relative;
+        `;
+
+        const counterSpan = document.createElement('span');
+        counterSpan.textContent = `Разговоров: ${settings.conversationCount}`;
+        counterSpan.style.cssText = `
+            color: #00ff9d;
+            font-size: 16px;
+            font-weight: bold;
+            text-shadow: 0 0 5px #00ff9d, 0 0 10px #00ff9d;
+            padding: 5px 10px;
+            background: rgba(0, 0, 0, 0.7);
+            border-radius: 8px;
+            cursor: default;
+            display: inline-block;
+        `;
+
+        const tooltip = document.createElement('div');
+        tooltip.style.cssText = `
+            position: absolute;
+            top: calc(100% + 5px);
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(43, 43, 43, 0.95);
+            color: #fff;
+            padding: 10px;
+            border-radius: 6px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+            font-size: 12px;
+            display: none;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            z-index: 1000;
+            white-space: nowrap;
+        `;
+        tooltip.innerHTML = `
+            Из них дольше:<br>
+            5 минут: ${settings.conversationStats.over5min}<br>
+            15 минут: ${settings.conversationStats.over15min}<br>
+            30 минут: ${settings.conversationStats.over30min}<br>
+            1 часа: ${settings.conversationStats.over1hour}<br>
+            2 часов: ${settings.conversationStats.over2hours}<br>
+            3 часов: ${settings.conversationStats.over3hours}<br>
+            5 часов: ${settings.conversationStats.over5hours}
+        `;
+
+        counterDiv.appendChild(counterSpan);
+        counterDiv.appendChild(tooltip);
+
+        counterSpan.addEventListener('mouseenter', () => {
+            tooltip.style.display = 'block';
+            setTimeout(() => {
+                tooltip.style.opacity = '1';
+            }, 10);
+        });
+
+        counterSpan.addEventListener('mouseleave', () => {
+            tooltip.style.opacity = '0';
+            setTimeout(() => {
+                tooltip.style.display = 'none';
+            }, 300);
+        });
+
+        return counterDiv;
+    }
+
     function createSettingsUI() {
-        console.log('Создание UI настроек...');
         const container = document.createElement('div');
         container.id = 'settings-container';
         container.style.position = 'fixed';
@@ -465,6 +769,55 @@
         header.style.textTransform = 'uppercase';
         header.style.letterSpacing = '2px';
         container.appendChild(header);
+
+        container.appendChild(createConversationCounter());
+
+        // Добавляем контейнер для кнопок
+        const audioControls = document.createElement('div');
+        audioControls.style.display = 'flex';
+        audioControls.style.gap = '10px';
+        audioControls.style.marginBottom = '20px';
+        audioControls.style.justifyContent = 'center';
+
+        // Кнопка микрофона
+        const micButton = document.createElement('button');
+        micButton.id = 'mic-toggle';
+        micButton.innerHTML = '🎤';
+        micButton.style.width = '40px';
+        micButton.style.height = '40px';
+        micButton.style.borderRadius = '50%';
+        micButton.style.background = '#00ff9d';
+        micButton.style.border = 'none';
+        micButton.style.cursor = 'pointer';
+        micButton.style.fontSize = '20px';
+        micButton.style.display = 'flex';
+        micButton.style.alignItems = 'center';
+        micButton.style.justifyContent = 'center';
+        micButton.style.boxShadow = '0 0 10px #00ff9d';
+        micButton.style.transition = 'all 0.3s ease';
+        micButton.addEventListener('click', toggleMic);
+
+        // Кнопка наушников
+        const headphoneButton = document.createElement('button');
+        headphoneButton.id = 'headphone-toggle';
+        headphoneButton.innerHTML = '🎧';
+        headphoneButton.style.width = '40px';
+        headphoneButton.style.height = '40px';
+        headphoneButton.style.borderRadius = '50%';
+        headphoneButton.style.background = '#00ff9d';
+        headphoneButton.style.border = 'none';
+        headphoneButton.style.cursor = 'pointer';
+        headphoneButton.style.fontSize = '20px';
+        headphoneButton.style.display = 'flex';
+        headphoneButton.style.alignItems = 'center';
+        headphoneButton.style.justifyContent = 'center';
+        headphoneButton.style.boxShadow = '0 0 10px #00ff9d';
+        headphoneButton.style.transition = 'all 0.3s ease';
+        headphoneButton.addEventListener('click', toggleHeadphones);
+
+        audioControls.appendChild(micButton);
+        audioControls.appendChild(headphoneButton);
+        container.appendChild(audioControls);
 
         const toggleWrapper = document.createElement('div');
         toggleWrapper.style.display = 'flex';
@@ -594,7 +947,7 @@
                 volumeSlider.addEventListener('input', () => {
                     settings.gainValue = parseFloat(volumeSlider.value);
                     volumeLabel.textContent = `Громкость самопрослушивания: ${settings.gainValue.toFixed(1)}`;
-                    localStorage.setItem('gainValue', settings.gainValue);
+                    saveSetting('gainValue', settings.gainValue);
                     if (gainNode) gainNode.gain.value = settings.gainValue;
                     volumeSlider.style.background = `linear-gradient(to right, #ff007a ${((settings.gainValue - 0.1) / 2.9) * 100}%, #555 0%)`;
                 });
@@ -632,7 +985,7 @@
                 pitchSlider.addEventListener('input', () => {
                     settings.pitchLevel = parseFloat(pitchSlider.value);
                     pitchLabel.textContent = `0 - обычный голос, 0.40 - очень низкий: ${settings.pitchLevel.toFixed(2)}`;
-                    localStorage.setItem('pitchLevel', settings.pitchLevel);
+                    saveSetting('pitchLevel', settings.pitchLevel);
                     updatePitchLevel(settings.pitchLevel);
                     pitchSlider.style.background = `linear-gradient(to right, #ff007a ${(settings.pitchLevel / 0.4) * 100}%, #555 0%)`;
                 });
@@ -640,7 +993,7 @@
 
             checkbox.addEventListener('change', () => {
                 settings[key] = checkbox.checked;
-                localStorage.setItem(key, JSON.stringify(checkbox.checked));
+                saveSetting(key, checkbox.checked);
                 checkbox.style.background = checkbox.checked ? '#00ff9d' : '#555';
                 if (key === 'enableLoopback') {
                     if (checkbox.checked && globalStream) enableSelfListening(globalStream);
@@ -682,6 +1035,8 @@
         audioSettings.appendChild(createToggle('Голосовое управление', 'voiceControl'));
 
         container.appendChild(audioSettings);
+        container.appendChild(createThemeSelector()); // Добавляем селектор тем
+
         document.body.appendChild(container);
 
         const styleSheet = document.createElement('style');
@@ -695,14 +1050,18 @@
                 cursor: pointer;
                 box-shadow: 0 0 5px #ff007a;
             }
+            select:hover {
+                background: #333;
+            }
+            select:focus {
+                border-color: #00ff9d;
+            }
         `;
         document.head.appendChild(styleSheet);
 
         container.addEventListener('mouseover', () => container.style.transform = 'scale(1.02)');
         container.addEventListener('mouseout', () => container.style.transform = 'scale(1)');
         toggleInput.addEventListener('change', (e) => toggleAutoMode(e.target.checked));
-
-        console.log('UI настроек успешно добавлен в DOM');
     }
 
     // ### Инициализация
@@ -713,30 +1072,60 @@
                     checkAndClickButton();
                     const audio = document.querySelector('audio#audioStream');
                     if (audio && audio.srcObject && settings.autoVolume) setupAutoVolume(audio.srcObject);
+
+                    const timerElement = document.querySelector('.timer-label');
+                    if (timerElement && timerElement.textContent === '00:00' && !conversationTimer) {
+                        startConversationTimer();
+                    }
+                    if (!timerElement && conversationTimer) {
+                        stopConversationTimer();
+                    }
+
+                    const stopButton = document.querySelector('button.btn.btn-lg.stop-talk-button');
+                    if (stopButton && !stopButton.dataset.listenerAdded) {
+                        stopButton.addEventListener('click', () => {
+                            setTimeout(() => {
+                                const confirmButton = document.querySelector('button.swal2-confirm.swal2-styled');
+                                if (confirmButton && !confirmButton.dataset.listenerAdded) {
+                                    confirmButton.addEventListener('click', playNotificationOnEnd);
+                                    confirmButton.dataset.listenerAdded = 'true';
+                                }
+                            }, 500);
+                        });
+                        stopButton.dataset.listenerAdded = 'true';
+                    }
                 }
             });
         });
         observer.observe(document.body, { childList: true, subtree: true });
     }
 
-    navigator.mediaDevices.getUserMedia = ((original) => {
-        return async (constraints) => {
-            if (constraints?.audio) {
-                constraints.audio = {
-                    ...constraints.audio,
-                    autoGainControl: settings.autoGainControl,
-                    noiseSuppression: settings.noiseSuppression,
-                    echoCancellation: settings.echoCancellation
-                };
-            }
-            const stream = await original.call(navigator.mediaDevices, constraints);
-            micStream = stream;
-            const processedStream = await createPitchShiftedStream(stream);
-            globalStream = processedStream;
-            if (settings.enableLoopback) enableSelfListening(processedStream);
-            return processedStream;
-        };
-    })(navigator.mediaDevices.getUserMedia);
+navigator.mediaDevices.getUserMedia = ((original) => {
+    return async (constraints) => {
+        if (constraints?.audio) {
+            constraints.audio = {
+                ...constraints.audio,
+                autoGainControl: settings.autoGainControl,
+                noiseSuppression: settings.noiseSuppression,
+                echoCancellation: settings.echoCancellation
+            };
+        }
+        const stream = await original.call(navigator.mediaDevices, constraints);
+        micStream = stream;
+        const processedStream = await createPitchShiftedStream(stream);
+        globalStream = processedStream;
+
+        // Применяем текущее состояние микрофона к новому потоку
+        if (globalStream && isMicMuted) {
+            globalStream.getAudioTracks().forEach(track => {
+                track.enabled = false;
+            });
+        }
+
+        if (settings.enableLoopback) enableSelfListening(processedStream);
+        return processedStream;
+    };
+})(navigator.mediaDevices.getUserMedia);
 
     const originalSet = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'srcObject').set;
     Object.defineProperty(HTMLMediaElement.prototype, 'srcObject', {
@@ -749,6 +1138,7 @@
     async function init() {
         console.log('Инициализация скрипта...');
         createSettingsUI();
+        applyTheme(settings.selectedTheme); // Применяем сохраненную тему при старте
         checkAndClickButton();
         initObserver();
         await initSpeechRecognition();
