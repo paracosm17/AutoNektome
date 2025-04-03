@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AutoNektome
 // @namespace    http://tampermonkey.net/
-// @version      4.0
+// @version      4.1
 // @description  Автоматический переход с настройками звука, голосовым управлением, улучшенной автогромкостью, изменением голоса и выбором тем для nekto.me audiochat
 // @author       @paracosm17
 // @match        https://nekto.me/audiochat
@@ -14,21 +14,28 @@
 (function() {
     'use strict';
 
-    // ### Константы
-    const NOTIFICATION_SOUND_URL = 'https://www.myinstants.com/media/sounds/pi-de-palavrao-da-tv-08112013.mp3';
+    // ### Настройка звуков уведомлений
+    const START_CONVERSATION_SOUND_URL = 'https://zvukogram.com/mp3/p2/2862/skayp-zvuk-soobschenie-poluchil-message-received-23007.mp3'; // Ссылка на звук начала разговора
+    const END_CONVERSATION_SOUND_URL = 'https://zvukogram.com//mp3/cats/791/enderman_teleport.mp3'; // Ссылка на звук окончания разговора
+    const START_SOUND_VOLUME = 0.4; // Громкость звука начала разговора (0.0 - 1.0)
+    const END_SOUND_VOLUME = 0.3; // Громкость звука окончания разговора (0.0 - 1.0)
+
+    // ### Настройка голосовых команд
     const VOICE_COMMANDS = {
-        skip: ['скип', 'skip', 'скиф', 'скипнуть', 'кофе', 'кефир', 'дальше'],
+        skip: ['скип', 'skip', 'скиф', 'скипнуть', 'кефир'],
         stop: ['завершить', 'остановить', 'закончить', 'кумыс'],
-        start: ['разговор', 'диалог', 'чат']
+        start: ['чат']
     };
-    const TARGET_VOLUME = 50;
-    const MIN_VOLUME = 10;
-    const MAX_VOLUME = 90;
-    const TRANSITION_DURATION = 1000;
-    const VOLUME_CHECK_INTERVAL = 200;
-    const HOLD_DURATION = 5000;
-    const SILENCE_THRESHOLD = 5;
-    const HISTORY_SIZE = 15;
+
+    // ### Настройки автогромкости собеседника
+    const TARGET_VOLUME = 50; // Целевая громкость звука в процентах (0-100), к которой стремится автогромкость
+    const MIN_VOLUME = 10; // Минимально допустимая громкость в процентах (0-100), ниже которой автогромкость не опустит звук
+    const MAX_VOLUME = 90; // Максимально допустимая громкость в процентах (0-100), выше которой автогромкость не поднимет звук
+    const TRANSITION_DURATION = 1000; // Длительность плавного перехода громкости в миллисекундах (1000 мс = 1 секунда)
+    const VOLUME_CHECK_INTERVAL = 200; // Интервал проверки громкости в миллисекундах (как часто анализируется уровень звука)
+    const HOLD_DURATION = 5000; // Время удержания текущей громкости в миллисекундах после громкого звука (5000 мс = 5 секунд)
+    const SILENCE_THRESHOLD = 5; // Порог тишины в процентах (0-100), ниже которого звук считается слишком тихим
+    const HISTORY_SIZE = 15; // Размер истории измерений громкости (количество последних значений для усреднения)
 
     // ### Темы
     const THEMES = {
@@ -92,8 +99,43 @@
     let currentThemeLink = null;
 
     // ### Утилиты
-    const notificationAudio = new Audio(NOTIFICATION_SOUND_URL);
-    notificationAudio.volume = 0.5;
+    const endConversationAudio = new Audio(END_CONVERSATION_SOUND_URL);
+    endConversationAudio.volume = END_SOUND_VOLUME;
+    const startConversationAudio = new Audio(START_CONVERSATION_SOUND_URL);
+    startConversationAudio.volume = START_SOUND_VOLUME;
+
+    // Блокировка звука connect.mp3 через MutationObserver
+    const blockConnectSound = () => {
+        const observer = new MutationObserver((mutations) => {
+            mutations.forEach((mutation) => {
+                if (mutation.addedNodes.length) {
+                    const audioElements = document.querySelectorAll('audio');
+                    audioElements.forEach(audio => {
+                        if (audio.src.includes('connect.mp3') && !audio.dataset.custom) {
+                            audio.src = '';
+                            audio.muted = true;
+                            audio.pause();
+                            audio.removeAttribute('preload');
+                            audio.setAttribute('data-blocked', 'true');
+                            console.log('Звук connect.mp3 заблокирован');
+                        }
+                    });
+                }
+            });
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+    };
+
+    // Запускаем блокировку сразу
+    blockConnectSound();
+    const originalPlay = HTMLAudioElement.prototype.play;
+    HTMLAudioElement.prototype.play = function() {
+        if (this.src.includes('connect.mp3') && !this.dataset.custom) {
+            console.log('Попытка воспроизведения connect.mp3 заблокирована');
+            return Promise.resolve();
+        }
+        return originalPlay.apply(this, arguments);
+    };
 
     function loadSetting(key, defaultValue, transform = JSON.parse) {
         const value = localStorage.getItem(key);
@@ -105,44 +147,44 @@
     }
 
     // ### Управление темами
-function applyTheme(themeName) {
-    if (currentThemeLink) {
-        currentThemeLink.remove();
-        currentThemeLink = null;
+    function applyTheme(themeName) {
+        if (currentThemeLink) {
+            currentThemeLink.remove();
+            currentThemeLink = null;
+        }
+
+        const loadingIndicator = document.querySelector('#settings-container select + span + span');
+        if (loadingIndicator) loadingIndicator.style.display = 'block';
+
+        if (themeName !== 'Original' && THEMES[themeName]) {
+            const styleElement = document.createElement('style');
+            styleElement.id = 'custom-theme-style';
+
+            fetch(THEMES[themeName])
+                .then(response => {
+                    if (!response.ok) throw new Error('Ошибка загрузки CSS');
+                    return response.text();
+                })
+                .then(css => {
+                    styleElement.textContent = css;
+                    document.head.appendChild(styleElement);
+                    currentThemeLink = styleElement;
+                    if (loadingIndicator) loadingIndicator.style.display = 'none';
+                })
+                .catch(error => {
+                    console.error('Ошибка при загрузке темы:', error);
+                    if (loadingIndicator) loadingIndicator.style.display = 'none';
+                });
+        } else if (themeName === 'Original') {
+            const existingStyles = document.querySelectorAll('style[id="custom-theme-style"]');
+            existingStyles.forEach(style => style.remove());
+            currentThemeLink = null;
+            if (loadingIndicator) loadingIndicator.style.display = 'none';
+        }
+
+        settings.selectedTheme = themeName;
+        saveSetting('selectedTheme', themeName);
     }
-
-    const loadingIndicator = document.querySelector('#settings-container select + span + span');
-    if (loadingIndicator) loadingIndicator.style.display = 'block';
-
-    if (themeName !== 'Original' && THEMES[themeName]) {
-        const styleElement = document.createElement('style');
-        styleElement.id = 'custom-theme-style';
-
-        fetch(THEMES[themeName])
-            .then(response => {
-                if (!response.ok) throw new Error('Ошибка загрузки CSS');
-                return response.text();
-            })
-            .then(css => {
-                styleElement.textContent = css;
-                document.head.appendChild(styleElement);
-                currentThemeLink = styleElement;
-                if (loadingIndicator) loadingIndicator.style.display = 'none';
-            })
-            .catch(error => {
-                console.error('Ошибка при загрузке темы:', error);
-                if (loadingIndicator) loadingIndicator.style.display = 'none';
-            });
-    } else if (themeName === 'Original') {
-        const existingStyles = document.querySelectorAll('style[id="custom-theme-style"]');
-        existingStyles.forEach(style => style.remove());
-        currentThemeLink = null;
-        if (loadingIndicator) loadingIndicator.style.display = 'none';
-    }
-
-    settings.selectedTheme = themeName;
-    saveSetting('selectedTheme', themeName);
-}
 
     function createThemeSelector() {
         const themeContainer = document.createElement('div');
@@ -280,8 +322,16 @@ function applyTheme(themeName) {
 
     function playNotificationOnEnd() {
         if (isConversationActive) {
-            notificationAudio.play();
+            endConversationAudio.play();
             isConversationActive = false;
+        }
+    }
+
+    function playNotificationOnStart() {
+        if (!isConversationActive) {
+            startConversationAudio.dataset.custom = 'true'; // Помечаем как кастомный звук
+            startConversationAudio.play();
+            isConversationActive = true;
         }
     }
 
@@ -577,7 +627,7 @@ function applyTheme(themeName) {
     function startConversationTimer() {
         if (conversationTimer) clearInterval(conversationTimer);
         currentConversationStart = Date.now();
-        isConversationActive = true;
+        playNotificationOnStart();
         conversationTimer = setInterval(() => {
             const timerElement = document.querySelector('.timer-label');
             if (!timerElement || timerElement.textContent === '00:00') {
@@ -620,25 +670,24 @@ function applyTheme(themeName) {
         updateButtonStyles();
     }
 
-function updateButtonStyles() {
-    const micButton = document.querySelector('#mic-toggle');
-    const headphoneButton = document.querySelector('#headphone-toggle');
+    function updateButtonStyles() {
+        const micButton = document.querySelector('#mic-toggle');
+        const headphoneButton = document.querySelector('#headphone-toggle');
 
-    if (micButton) {
-        // Проверяем реальное состояние треков, если globalStream доступен
-        const micState = globalStream && globalStream.getAudioTracks().length > 0 ? !globalStream.getAudioTracks()[0].enabled : isMicMuted;
-        isMicMuted = micState; // Синхронизируем переменную с реальным состоянием
-        micButton.style.background = isMicMuted ? '#ff4d4d' : '#00ff9d';
-        micButton.style.textDecoration = isMicMuted ? 'line-through' : 'none';
-        micButton.style.boxShadow = `0 0 10px ${isMicMuted ? '#ff4d4d' : '#00ff9d'}`;
-    }
+        if (micButton) {
+            const micState = globalStream && globalStream.getAudioTracks().length > 0 ? !globalStream.getAudioTracks()[0].enabled : isMicMuted;
+            isMicMuted = micState;
+            micButton.style.background = isMicMuted ? '#ff4d4d' : '#00ff9d';
+            micButton.style.textDecoration = isMicMuted ? 'line-through' : 'none';
+            micButton.style.boxShadow = `0 0 10px ${isMicMuted ? '#ff4d4d' : '#00ff9d'}`;
+        }
 
-    if (headphoneButton) {
-        headphoneButton.style.background = isHeadphonesMuted ? '#ff4d4d' : '#00ff9d';
-        headphoneButton.style.textDecoration = isHeadphonesMuted ? 'line-through' : 'none';
-        headphoneButton.style.boxShadow = `0 0 10px ${isHeadphonesMuted ? '#ff4d4d' : '#00ff9d'}`;
+        if (headphoneButton) {
+            headphoneButton.style.background = isHeadphonesMuted ? '#ff4d4d' : '#00ff9d';
+            headphoneButton.style.textDecoration = isHeadphonesMuted ? 'line-through' : 'none';
+            headphoneButton.style.boxShadow = `0 0 10px ${isHeadphonesMuted ? '#ff4d4d' : '#00ff9d'}`;
+        }
     }
-}
 
     // ### UI элементы
     function createVoiceHints() {
@@ -772,14 +821,12 @@ function updateButtonStyles() {
 
         container.appendChild(createConversationCounter());
 
-        // Добавляем контейнер для кнопок
         const audioControls = document.createElement('div');
         audioControls.style.display = 'flex';
         audioControls.style.gap = '10px';
         audioControls.style.marginBottom = '20px';
         audioControls.style.justifyContent = 'center';
 
-        // Кнопка микрофона
         const micButton = document.createElement('button');
         micButton.id = 'mic-toggle';
         micButton.innerHTML = '🎤';
@@ -797,7 +844,6 @@ function updateButtonStyles() {
         micButton.style.transition = 'all 0.3s ease';
         micButton.addEventListener('click', toggleMic);
 
-        // Кнопка наушников
         const headphoneButton = document.createElement('button');
         headphoneButton.id = 'headphone-toggle';
         headphoneButton.innerHTML = '🎧';
@@ -1035,7 +1081,7 @@ function updateButtonStyles() {
         audioSettings.appendChild(createToggle('Голосовое управление', 'voiceControl'));
 
         container.appendChild(audioSettings);
-        container.appendChild(createThemeSelector()); // Добавляем селектор тем
+        container.appendChild(createThemeSelector());
 
         document.body.appendChild(container);
 
@@ -1100,32 +1146,31 @@ function updateButtonStyles() {
         observer.observe(document.body, { childList: true, subtree: true });
     }
 
-navigator.mediaDevices.getUserMedia = ((original) => {
-    return async (constraints) => {
-        if (constraints?.audio) {
-            constraints.audio = {
-                ...constraints.audio,
-                autoGainControl: settings.autoGainControl,
-                noiseSuppression: settings.noiseSuppression,
-                echoCancellation: settings.echoCancellation
-            };
-        }
-        const stream = await original.call(navigator.mediaDevices, constraints);
-        micStream = stream;
-        const processedStream = await createPitchShiftedStream(stream);
-        globalStream = processedStream;
+    navigator.mediaDevices.getUserMedia = ((original) => {
+        return async (constraints) => {
+            if (constraints?.audio) {
+                constraints.audio = {
+                    ...constraints.audio,
+                    autoGainControl: settings.autoGainControl,
+                    noiseSuppression: settings.noiseSuppression,
+                    echoCancellation: settings.echoCancellation
+                };
+            }
+            const stream = await original.call(navigator.mediaDevices, constraints);
+            micStream = stream;
+            const processedStream = await createPitchShiftedStream(stream);
+            globalStream = processedStream;
 
-        // Применяем текущее состояние микрофона к новому потоку
-        if (globalStream && isMicMuted) {
-            globalStream.getAudioTracks().forEach(track => {
-                track.enabled = false;
-            });
-        }
+            if (globalStream && isMicMuted) {
+                globalStream.getAudioTracks().forEach(track => {
+                    track.enabled = false;
+                });
+            }
 
-        if (settings.enableLoopback) enableSelfListening(processedStream);
-        return processedStream;
-    };
-})(navigator.mediaDevices.getUserMedia);
+            if (settings.enableLoopback) enableSelfListening(processedStream);
+            return processedStream;
+        };
+    })(navigator.mediaDevices.getUserMedia);
 
     const originalSet = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'srcObject').set;
     Object.defineProperty(HTMLMediaElement.prototype, 'srcObject', {
@@ -1138,7 +1183,7 @@ navigator.mediaDevices.getUserMedia = ((original) => {
     async function init() {
         console.log('Инициализация скрипта...');
         createSettingsUI();
-        applyTheme(settings.selectedTheme); // Применяем сохраненную тему при старте
+        applyTheme(settings.selectedTheme);
         checkAndClickButton();
         initObserver();
         await initSpeechRecognition();
