@@ -15,7 +15,7 @@
             --monokai-button-stop-talk-color: #66d9ef; /* Кнопка остановки разговора - голубой */
             --monokai-button-continue-color: #e6db74; /* Кнопка продолжения - жёлтый */
             --monokai-button-got-color: #a6e22e;    /* Кнопка "понял" - зелёный */
-            --monokai-body-background: url('https://i.imgur.com/rhVpS73.png'); /* Оставил твой фон */
+            --monokai-body-background: #272822; /* Оставил твой фон */
             --monokai-header-background-color: #3e3d32; /* Шапка - чуть светлее фон */
             --monokai-header-text-color: #f8f8f2;   /* Текст шапки - мягкий белый */
             --monokai-header-border-color: #66d9ef; /* Граница шапки - голубой */
