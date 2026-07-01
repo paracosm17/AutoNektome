@@ -250,79 +250,47 @@ a { color: var(--an-site-accent) !important; }
 }
 
 
-/* v5.5.4 final layout polish: hide original header chrome and promote online counter */
-.container.swipes,
-.header.header_chat,
-body > .header.header_chat,
-.audio-chat .header.header_chat,
-.audio-chat div:has(> a[href*="play.google.com/store/apps/details"][href*="com.nektome"]),
-.audio-chat a[href*="play.google.com/store/apps/details"][href*="com.nektome"],
-.audio-chat img[src*="gplaybtn"] {
+/* v5.5.6 layout polish: the userscript moves online counter into the main panel. */
+body.autonektome-site-themed > .navbar,
+body.autonektome-site-themed .navbar.navbar-inverse.navbar-fixed-top,
+body.autonektome-site-themed .navbar-fixed-top,
+body.autonektome-site-themed .container.swipes,
+body.autonektome-site-themed .tabs_type_chats,
+body.autonektome-site-themed .header.header_chat,
+body.autonektome-site-themed .chat-step.idle .description,
+body.autonektome-site-themed .audio-chat .description,
+body.autonektome-site-themed a[href*="play.google.com/store/apps/details"][href*="com.nektome"],
+body.autonektome-site-themed img[src*="gplaybtn"] {
     display: none !important;
-}
-
-.audio-chat {
-    padding-top: 82px !important;
-}
-
-.audio-chat .users-count-panel {
-    position: fixed !important;
-    top: 18px !important;
-    left: 28px !important;
-    z-index: 4 !important;
-    min-width: min(430px, calc(100vw - 360px)) !important;
-    display: inline-flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    flex-direction: row !important;
-    gap: 10px !important;
-    padding: 14px 18px !important;
+    visibility: hidden !important;
+    opacity: 0 !important;
+    width: 0 !important;
+    height: 0 !important;
+    max-width: 0 !important;
+    max-height: 0 !important;
+    min-height: 0 !important;
     margin: 0 !important;
-    border: 1px solid color-mix(in srgb, var(--an-site-accent) 34%, var(--an-site-border)) !important;
-    border-radius: 22px !important;
-    background:
-        radial-gradient(circle at 18% 20%, color-mix(in srgb, var(--an-site-accent) 18%, transparent), transparent 42%),
-        linear-gradient(180deg, color-mix(in srgb, var(--an-site-surface-2) 95%, transparent), color-mix(in srgb, var(--an-site-bg) 92%, transparent)) !important;
-    color: var(--an-site-text) !important;
-    box-shadow: 0 18px 46px rgba(0,0,0,.34), inset 0 1px 0 rgba(255,255,255,.05) !important;
-    backdrop-filter: blur(16px) saturate(1.1) !important;
+    padding: 0 !important;
+    border: 0 !important;
+    overflow: hidden !important;
+    pointer-events: none !important;
+    transform: none !important;
+    box-shadow: none !important;
 }
 
-.audio-chat .users-count-panel .talking,
-.audio-chat .users-count-panel .join {
-    margin: 0 !important;
-    color: var(--an-site-muted) !important;
-    font-size: 14px !important;
-    line-height: 1.2 !important;
-    white-space: nowrap !important;
+body.autonektome-site-themed .wraps,
+body.autonektome-site-themed .chat_container,
+body.autonektome-site-themed .outer-container,
+body.autonektome-site-themed #audio-chat-container,
+body.autonektome-site-themed .audio-chat {
+    padding-top: 0 !important;
+    margin-top: 0 !important;
 }
 
-.audio-chat .users-count-panel .talking-count {
-    display: inline-block !important;
-    color: var(--an-site-accent) !important;
-    font-size: 24px !important;
-    font-weight: 900 !important;
-    letter-spacing: .01em !important;
-    line-height: 1 !important;
-    text-shadow: 0 0 22px color-mix(in srgb, var(--an-site-accent) 32%, transparent) !important;
-}
-
-.audio-chat .users-count-panel .join {
-    padding: 6px 10px !important;
-    border-radius: 999px !important;
-    border: 1px solid color-mix(in srgb, var(--an-site-accent) 24%, transparent) !important;
-    background: color-mix(in srgb, var(--an-site-accent) 10%, transparent) !important;
-    color: color-mix(in srgb, var(--an-site-accent) 78%, var(--an-site-text)) !important;
-    font-weight: 750 !important;
-}
-
-@media (max-width: 980px) {
-    .audio-chat { padding-top: 92px !important; }
-    .audio-chat .users-count-panel {
-        left: 12px !important;
-        right: 12px !important;
-        min-width: 0 !important;
-        width: auto !important;
-        flex-wrap: wrap !important;
-    }
+body.autonektome-site-themed .chat-step.idle .main-panel > .users-count-panel.autonektome-online-top {
+    position: relative !important;
+    inset: auto !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 0 18px 0 !important;
 }
