@@ -1,0 +1,250 @@
+/* AutoNektome Rose Pine Moon — modern dark theme */
+:root {
+    --an-site-bg: #191724;
+    --an-site-bg-2: #1f1d2e;
+    --an-site-bg-3: #26233a;
+    --an-site-surface: rgba(31,29,46,.90);
+    --an-site-surface-2: rgba(38,35,58,.94);
+    --an-site-surface-3: #393552;
+    --an-site-border: rgba(64,61,82,.88);
+    --an-site-border-strong: rgba(196,167,231,.42);
+    --an-site-text: #e0def4;
+    --an-site-muted: #908caa;
+    --an-site-accent: #c4a7e7;
+    --an-site-accent-2: #9ccfd8;
+    --an-site-green: #31748f;
+    --an-site-red: #eb6f92;
+    --an-site-yellow: #f6c177;
+    --an-theme-canvas-bg: rgba(25,23,36,.97);
+    --an-theme-particle: 196,167,231;
+    --an-theme-particle-shadow: 156,207,216;
+}
+
+html, body, body.night_theme {
+    min-height: 100% !important;
+    background:
+        radial-gradient(circle at 18% 8%, color-mix(in srgb, var(--an-site-accent) 17%, transparent), transparent 34%),
+        radial-gradient(circle at 82% 0%, color-mix(in srgb, var(--an-site-accent-2) 13%, transparent), transparent 30%),
+        linear-gradient(180deg, var(--an-site-bg) 0%, var(--an-site-bg-2) 48%, var(--an-site-bg) 100%) !important;
+    color: var(--an-site-text) !important;
+}
+
+#particles-canvas {
+    position: fixed !important;
+    inset: 0 !important;
+    width: 100vw !important;
+    height: 100vh !important;
+    z-index: 0 !important;
+    pointer-events: none !important;
+    opacity: .92 !important;
+    background: var(--an-theme-canvas-bg) !important;
+}
+
+.wraps, .chat_container, .outer-container, #audio-chat-container, .audio-chat,
+.chat-step, .centerToSearchBlock, .header_chat, body.night_theme .audio-chat,
+body.night_theme .chat_container .audio-chat, body.night_theme .audio-chat > div {
+    background: transparent !important;
+    color: var(--an-site-text) !important;
+    position: relative;
+    z-index: 1;
+}
+
+.navbar, .navbar-inverse, .tabs_type_chats {
+    background: color-mix(in srgb, var(--an-site-bg) 86%, transparent) !important;
+    border-color: color-mix(in srgb, var(--an-site-accent) 16%, transparent) !important;
+    box-shadow: 0 10px 28px rgba(0,0,0,.24) !important;
+    backdrop-filter: blur(12px);
+}
+
+.navbar-brand, .navbar a, .header, .header h1, .chat, .description, .filter-label,
+.users-count-panel, .talking, .join, label, span, div {
+    color: inherit;
+}
+
+a { color: var(--an-site-accent) !important; }
+
+.audio-chat .description,
+.audio-chat .main-panel,
+.audio-chat .window_chat_statuss,
+.audio-chat .opened-label,
+.audio-chat .need-update-label,
+.swal2-popup {
+    background: linear-gradient(180deg, color-mix(in srgb, var(--an-site-surface) 96%, transparent), color-mix(in srgb, var(--an-site-surface-2) 94%, transparent)) !important;
+    border: 1px solid var(--an-site-border) !important;
+    border-radius: 18px !important;
+    box-shadow: 0 18px 48px rgba(0,0,0,.34), inset 0 1px 0 rgba(255,255,255,.035) !important;
+    color: var(--an-site-text) !important;
+    backdrop-filter: blur(14px);
+}
+
+.audio-chat .description {
+    padding: 18px 20px !important;
+    line-height: 1.52 !important;
+}
+
+.audio-chat .description h1,
+.audio-chat .title,
+.audio-chat h1.chat,
+.audio-chat .users-count-panel .talking-count,
+.navbar-brand span {
+    color: var(--an-site-accent) !important;
+    text-shadow: 0 0 18px color-mix(in srgb, var(--an-site-accent) 22%, transparent) !important;
+}
+
+.audio-chat .chat-step.idle .main-panel,
+.audio-chat .sex-filter-panel,
+.audio-chat .age-filter-panel,
+.audio-chat .theme-filter-panel {
+    background: color-mix(in srgb, var(--an-site-surface) 76%, transparent) !important;
+    border: 1px solid color-mix(in srgb, var(--an-site-accent) 22%, var(--an-site-border)) !important;
+    border-radius: 18px !important;
+    box-shadow: 0 12px 34px rgba(0,0,0,.22) !important;
+}
+
+.audio-chat .sex-filter-panel,
+.audio-chat .age-filter-panel,
+.audio-chat .theme-filter-panel {
+    width: 100% !important;
+    margin: 14px 0 0 !important;
+    padding: 16px !important;
+    overflow: visible !important;
+}
+
+.audio-chat .filter-label,
+.audio-chat .sex-filter-panel > div:first-child,
+.audio-chat .age-filter-panel > div:first-child,
+.audio-chat .theme-filter-panel > div:first-child {
+    color: var(--an-site-muted) !important;
+    font-weight: 700 !important;
+    letter-spacing: .01em !important;
+    margin: 0 0 9px !important;
+}
+
+.audio-chat .btn,
+.audio-chat button.btn,
+.audio-chat .btn-default,
+.audio-chat .btn-lg,
+.audio-chat .btnNekto,
+.audio-chat .btnNektoLink,
+.audio-chat .scan-button,
+.audio-chat .go-scan-button,
+.audio-chat .stop-scan-button,
+.audio-chat .stop-talk-button,
+.audio-chat .go-idle-button,
+.audio-chat .mute-button,
+.audio-chat .callScreen__findBtn,
+.audio-chat .callScreen__cancelCallBtn {
+    min-height: 42px !important;
+    border-radius: 12px !important;
+    border: 1px solid var(--an-site-border-strong) !important;
+    background: linear-gradient(180deg, color-mix(in srgb, var(--an-site-surface-3) 92%, transparent), color-mix(in srgb, var(--an-site-surface-2) 94%, transparent)) !important;
+    color: var(--an-site-text) !important;
+    box-shadow: 0 8px 22px rgba(0,0,0,.18), inset 0 1px 0 rgba(255,255,255,.045) !important;
+    text-shadow: none !important;
+    font-weight: 700 !important;
+    transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease, background .16s ease, color .16s ease !important;
+}
+
+.audio-chat .btn:hover,
+.audio-chat button.btn:hover,
+.audio-chat .btnNekto:hover,
+.audio-chat .btnNektoLink:hover {
+    transform: translateY(-1px);
+    border-color: color-mix(in srgb, var(--an-site-accent) 62%, var(--an-site-border-strong)) !important;
+    box-shadow: 0 12px 28px rgba(0,0,0,.25), 0 0 0 1px color-mix(in srgb, var(--an-site-accent) 20%, transparent) !important;
+}
+
+.audio-chat .btn.checked,
+.audio-chat .btn-default.checked,
+.audio-chat .btncheck.checked,
+.audio-chat .sex-buttons-panel .checked,
+.audio-chat .s-age .checked {
+    background: linear-gradient(135deg, color-mix(in srgb, var(--an-site-accent) 92%, #000), color-mix(in srgb, var(--an-site-accent-2) 78%, #000)) !important;
+    border-color: color-mix(in srgb, var(--an-site-accent) 78%, #fff) !important;
+    color: #ffffff !important;
+    box-shadow: 0 10px 26px color-mix(in srgb, var(--an-site-accent) 24%, transparent) !important;
+}
+
+.audio-chat .scan-button,
+.audio-chat .go-scan-button,
+.audio-chat #searchCompanyBtn,
+.audio-chat .btnNekto.green,
+.audio-chat .callScreen__findBtn {
+    background: linear-gradient(135deg, color-mix(in srgb, var(--an-site-green) 88%, #000), color-mix(in srgb, var(--an-site-accent) 72%, #000)) !important;
+    border-color: color-mix(in srgb, var(--an-site-green) 52%, var(--an-site-accent)) !important;
+    color: #ffffff !important;
+    font-weight: 800 !important;
+}
+
+.audio-chat #searchCompanyBtn {
+    min-width: 210px !important;
+    min-height: 56px !important;
+    border-radius: 16px !important;
+    font-size: 19px !important;
+    padding: 12px 30px !important;
+}
+
+.audio-chat .stop-scan-button,
+.audio-chat .stop-talk-button,
+.audio-chat .go-idle-button,
+.audio-chat .btnNektoLink,
+.audio-chat .cancelCallBtnNoMess,
+.audio-chat .danger2 {
+    display: inline-flex !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    align-items: center !important;
+    justify-content: center !important;
+    background: color-mix(in srgb, var(--an-site-red) 13%, transparent) !important;
+    border-color: color-mix(in srgb, var(--an-site-red) 58%, var(--an-site-border)) !important;
+    color: color-mix(in srgb, var(--an-site-red) 84%, #fff) !important;
+}
+
+.audio-chat .chat-step.scan .buttons-panel.flex-spacer,
+.audio-chat .chat-step.scan .flex-spacer {
+    display: flex !important;
+    flex: 1 1 auto !important;
+    min-height: 110px !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 14px !important;
+    padding: 18px 0 !important;
+}
+
+.audio-chat .chat-step.scan .long_search_text {
+    display: block !important;
+    color: var(--an-site-muted) !important;
+    text-align: center !important;
+    line-height: 1.35 !important;
+}
+
+.audio-chat input,
+.audio-chat select,
+.audio-chat textarea {
+    background: color-mix(in srgb, var(--an-site-bg) 70%, transparent) !important;
+    border-color: var(--an-site-border) !important;
+    color: var(--an-site-text) !important;
+    border-radius: 12px !important;
+}
+
+.audio-chat .customLoader__text,
+.audio-chat .peer-age-hint,
+.audio-chat .user-age-hint,
+.audio-chat .search_text {
+    color: var(--an-site-muted) !important;
+}
+
+.audio-chat .search_loader_circle .call-big-round__circle,
+.audio-chat .search_loader_circle .call-big-round__border {
+    stroke: var(--an-site-accent) !important;
+}
+
+.audio-chat .search_loader_circle .call-big-round__question {
+    fill: var(--an-site-accent) !important;
+}
+
+.swal2-popup {
+    background: var(--an-site-surface) !important;
+    color: var(--an-site-text) !important;
+}
