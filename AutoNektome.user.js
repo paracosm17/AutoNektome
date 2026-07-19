@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AutoNektome
 // @namespace    http://tampermonkey.net/
-// @version      5.0.0
+// @version      5.1
 // @description  Автоматический переход с настройками звука, голосовым управлением и выбором тем для nekto.me audiochat.
 // @author       @paracosm17
 // @match        *://*nekto.me/audiochat*
@@ -15,9 +15,232 @@
 // ==/UserScript==
 
 (function() {
+  // Реестр фактических аудиотреков, которые могут быть переданы собеседнику.
+  // Устанавливается при запуске панели или непосредственно перед первым поиском,
+  // чтобы кнопка микрофона управляла не только внутренним потоком AutoNektome,
+  // но и WebRTC-треком самого NektoMe.
+  const __autoNektomeMediaSafety = (() => {
+    const audioTracks = new Set();
+    const peerConnections = new Set();
+    const enabledBeforeMute = new WeakMap();
+    let muted = false;
+    let enforcementTimer = null;
+
+    const isAudioTrack = track => !!track && track.kind === 'audio';
+
+    const forgetTrack = track => {
+      audioTracks.delete(track);
+      enabledBeforeMute.delete(track);
+    };
+
+    const applyTrackState = track => {
+      if (!isAudioTrack(track) || track.readyState === 'ended') {
+        if (track) forgetTrack(track);
+        return false;
+      }
+
+      try {
+        if (muted) {
+          if (!enabledBeforeMute.has(track)) enabledBeforeMute.set(track, track.enabled !== false);
+          track.enabled = false;
+        } else if (enabledBeforeMute.has(track)) {
+          const previousState = enabledBeforeMute.get(track);
+          enabledBeforeMute.delete(track);
+          track.enabled = previousState;
+        }
+      } catch (error) {}
+      return true;
+    };
+
+    const registerTrack = track => {
+      if (!isAudioTrack(track)) return track;
+      if (!audioTracks.has(track)) {
+        audioTracks.add(track);
+        try {
+          track.addEventListener?.('ended', () => forgetTrack(track), { once: true });
+        } catch (error) {}
+      }
+      applyTrackState(track);
+      return track;
+    };
+
+    const registerStream = stream => {
+      if (!stream?.getAudioTracks) return stream;
+      try { stream.getAudioTracks().forEach(registerTrack); } catch (error) {}
+      try {
+        if (!stream.__autoNektomeTrackListenerInstalled) {
+          Object.defineProperty(stream, '__autoNektomeTrackListenerInstalled', {
+            value: true,
+            configurable: true
+          });
+          stream.addEventListener?.('addtrack', event => registerTrack(event.track));
+        }
+      } catch (error) {}
+      return stream;
+    };
+
+    const registerPeerConnection = connection => {
+      if (!connection || typeof connection.getSenders !== 'function') return connection;
+      peerConnections.add(connection);
+      try { connection.getSenders().forEach(sender => registerTrack(sender?.track)); } catch (error) {}
+      return connection;
+    };
+
+    const enforceMutedState = () => {
+      peerConnections.forEach(connection => {
+        if (!connection || connection.connectionState === 'closed' || connection.signalingState === 'closed') {
+          peerConnections.delete(connection);
+          return;
+        }
+        registerPeerConnection(connection);
+      });
+      audioTracks.forEach(applyTrackState);
+    };
+
+    const syncEnforcementTimer = () => {
+      if (muted && !enforcementTimer) {
+        enforcementTimer = setInterval(enforceMutedState, 200);
+      } else if (!muted && enforcementTimer) {
+        clearInterval(enforcementTimer);
+        enforcementTimer = null;
+      }
+    };
+
+    const setMuted = value => {
+      muted = !!value;
+      enforceMutedState();
+      syncEnforcementTimer();
+      return muted;
+    };
+
+    const install = () => {
+      const mediaDevices = navigator.mediaDevices;
+      if (mediaDevices?.getUserMedia && !mediaDevices.getUserMedia.__autoNektomeSafetyWrapped) {
+        try {
+          const originalGetUserMedia = mediaDevices.getUserMedia;
+          const wrappedGetUserMedia = function(...args) {
+            return Reflect.apply(originalGetUserMedia, mediaDevices, args).then(registerStream);
+          };
+          Object.defineProperty(wrappedGetUserMedia, '__autoNektomeSafetyWrapped', { value: true });
+          Object.defineProperty(wrappedGetUserMedia, '__autoNektomeOriginal', { value: originalGetUserMedia });
+          mediaDevices.getUserMedia = wrappedGetUserMedia;
+        } catch (error) {}
+      }
+
+      const peerPrototype = window.RTCPeerConnection?.prototype;
+      if (peerPrototype?.addTrack && !peerPrototype.addTrack.__autoNektomeSafetyWrapped) {
+        try {
+          const originalAddTrack = peerPrototype.addTrack;
+          const wrappedAddTrack = function(track, ...streams) {
+            registerTrack(track);
+            streams.forEach(registerStream);
+            const sender = Reflect.apply(originalAddTrack, this, [track, ...streams]);
+            registerPeerConnection(this);
+            registerTrack(sender?.track);
+            return sender;
+          };
+          Object.defineProperty(wrappedAddTrack, '__autoNektomeSafetyWrapped', { value: true });
+          peerPrototype.addTrack = wrappedAddTrack;
+        } catch (error) {}
+      }
+
+      if (peerPrototype?.addStream && !peerPrototype.addStream.__autoNektomeSafetyWrapped) {
+        try {
+          const originalAddStream = peerPrototype.addStream;
+          const wrappedAddStream = function(stream) {
+            registerStream(stream);
+            const result = Reflect.apply(originalAddStream, this, [stream]);
+            registerPeerConnection(this);
+            return result;
+          };
+          Object.defineProperty(wrappedAddStream, '__autoNektomeSafetyWrapped', { value: true });
+          peerPrototype.addStream = wrappedAddStream;
+        } catch (error) {}
+      }
+
+      if (peerPrototype?.addTransceiver && !peerPrototype.addTransceiver.__autoNektomeSafetyWrapped) {
+        try {
+          const originalAddTransceiver = peerPrototype.addTransceiver;
+          const wrappedAddTransceiver = function(trackOrKind, init) {
+            if (typeof trackOrKind === 'object') registerTrack(trackOrKind);
+            const transceiver = Reflect.apply(originalAddTransceiver, this, [trackOrKind, init]);
+            registerPeerConnection(this);
+            registerTrack(transceiver?.sender?.track);
+            return transceiver;
+          };
+          Object.defineProperty(wrappedAddTransceiver, '__autoNektomeSafetyWrapped', { value: true });
+          peerPrototype.addTransceiver = wrappedAddTransceiver;
+        } catch (error) {}
+      }
+
+      const senderPrototype = window.RTCRtpSender?.prototype;
+      if (senderPrototype?.replaceTrack && !senderPrototype.replaceTrack.__autoNektomeSafetyWrapped) {
+        try {
+          const originalReplaceTrack = senderPrototype.replaceTrack;
+          const wrappedReplaceTrack = function(track) {
+            registerTrack(track);
+            return Reflect.apply(originalReplaceTrack, this, [track]);
+          };
+          Object.defineProperty(wrappedReplaceTrack, '__autoNektomeSafetyWrapped', { value: true });
+          senderPrototype.replaceTrack = wrappedReplaceTrack;
+        } catch (error) {}
+      }
+
+      const mediaStreamPrototype = window.MediaStream?.prototype;
+      if (mediaStreamPrototype?.addTrack && !mediaStreamPrototype.addTrack.__autoNektomeSafetyWrapped) {
+        try {
+          const originalStreamAddTrack = mediaStreamPrototype.addTrack;
+          const wrappedStreamAddTrack = function(track) {
+            registerTrack(track);
+            return Reflect.apply(originalStreamAddTrack, this, [track]);
+          };
+          Object.defineProperty(wrappedStreamAddTrack, '__autoNektomeSafetyWrapped', { value: true });
+          mediaStreamPrototype.addTrack = wrappedStreamAddTrack;
+        } catch (error) {}
+      }
+
+      const trackPrototype = window.MediaStreamTrack?.prototype;
+      if (trackPrototype?.clone && !trackPrototype.clone.__autoNektomeSafetyWrapped) {
+        try {
+          const originalClone = trackPrototype.clone;
+          const wrappedClone = function() {
+            const clonedTrack = Reflect.apply(originalClone, this, []);
+            registerTrack(clonedTrack);
+            return clonedTrack;
+          };
+          Object.defineProperty(wrappedClone, '__autoNektomeSafetyWrapped', { value: true });
+          trackPrototype.clone = wrappedClone;
+        } catch (error) {}
+      }
+
+      enforceMutedState();
+      return true;
+    };
+
+    return {
+      install,
+      registerTrack,
+      registerStream,
+      registerPeerConnection,
+      setMuted,
+      isMuted: () => muted,
+      getLiveTrackCount: () => Array.from(audioTracks).filter(track => track.readyState !== 'ended').length
+    };
+  })();
+
+  // При прямом открытии или перезагрузке уже активного маршрута ставим защиту
+  // до того, как сайт успеет создать исходящий микрофонный sender.
+  if (/#\/(?:peer|searching)(?:$|[/?])/i.test(location.hash || '')) {
+    __autoNektomeMediaSafety.install();
+  }
+
+  const __autoNektomeLateBoot = () => {
+
     'use strict';
 
-    const SCRIPT_VERSION = '5.0.0';
+    __autoNektomeMediaSafety.install();
+
+    const SCRIPT_VERSION = '5.1';
 
     // ### Настройка звуков уведомлений
     const START_CONVERSATION_SOUND_URL = 'https://zvukogram.com/mp3/22/skype-sound-message-received-message-received.mp3';
@@ -182,6 +405,23 @@
         }
     };
 
+    // Встроенная базовая палитра используется сразу, пока полный CSS темы
+    // загружается из репозитория. Благодаря этому смена темы остаётся заметной
+    // даже при блокировке cross-origin fetch политикой сайта или расширением.
+    const SITE_THEME_FALLBACKS = {
+        'GitHub Dark': { bg: '#0d1117', bg2: '#010409', surface: '#161b22', surface2: '#21262d', text: '#c9d1d9', muted: '#8b949e' },
+        'GitHub Dark High Contrast': { bg: '#010409', bg2: '#060a11', surface: '#0d1117', surface2: '#161b22', text: '#f0f6fc', muted: '#8b949e' },
+        'Catppuccin Mocha': { bg: '#11111b', bg2: '#181825', surface: '#1e1e2e', surface2: '#313244', text: '#cdd6f4', muted: '#a6adc8' },
+        'Ayu Dark': { bg: '#0b0e14', bg2: '#0f131a', surface: '#151a23', surface2: '#1f2430', text: '#bfbdb6', muted: '#7a818e' },
+        'Gotham': { bg: '#0c1014', bg2: '#10181d', surface: '#13232a', surface2: '#17343b', text: '#98d1ce', muted: '#5f8787' },
+        'Rose Pine Moon': { bg: '#191724', bg2: '#1f1d2e', surface: '#26233a', surface2: '#393552', text: '#e0def4', muted: '#908caa' },
+        'Gruvbox Dark': { bg: '#1d2021', bg2: '#282828', surface: '#32302f', surface2: '#3c3836', text: '#ebdbb2', muted: '#a89984' },
+        'Dracula': { bg: '#282a36', bg2: '#21222c', surface: '#343746', surface2: '#44475a', text: '#f8f8f2', muted: '#b9bac4' },
+        'One Dark': { bg: '#282c34', bg2: '#21252b', surface: '#2c313c', surface2: '#353b45', text: '#abb2bf', muted: '#7f848e' },
+        'Monokai': { bg: '#272822', bg2: '#1e1f1c', surface: '#33342d', surface2: '#3e3d32', text: '#f8f8f2', muted: '#a8a897' },
+        'Nord': { bg: '#2e3440', bg2: '#242933', surface: '#3b4252', surface2: '#434c5e', text: '#eceff4', muted: '#d8dee9' }
+    };
+
     // ### Настройки из localStorage
     const settings = {
         enableLoopback: loadSetting('enableLoopback', false),
@@ -191,8 +431,10 @@
         gainValue: loadSetting('gainValue', 1.5, parseFloat),
         voiceControl: loadSetting('voiceControl', false),
         autoVolume: loadSetting('autoVolume', true),
-        voicePitch: loadSetting('voicePitch', false),
-        pitchLevel: loadSetting('pitchLevel', 0, parseFloat),
+        notificationSounds: loadSetting('notificationSounds', true),
+        autoConfirmDisconnect: loadSetting('autoConfirmDisconnect', false),
+        disconnectProtection: loadSetting('disconnectProtection', true),
+        siteVolume: loadSetting('siteVolume', 50, parseFloat),
         conversationCount: loadSetting('conversationCount', 0, parseInt),
         conversationStats: loadSetting('conversationStats', {
             over5min: 0,
@@ -207,46 +449,12 @@
         totalConversationDuration: loadSetting('totalConversationDuration', 0, parseInt),
         voiceCommands: normalizeVoiceCommands(loadSetting('voiceCommands', DEFAULT_VOICE_COMMANDS)),
         diagnosticLogs: loadSetting('diagnosticLogs', false),
-        adBlock: loadSetting('adBlock', true),
-        adBlockHideElements: loadSetting('adBlockHideElements', true),
-        adBlockBlockNetwork: loadSetting('adBlockBlockNetwork', true),
-        metricBlock: loadSetting('metricBlock', true),
-        metricGlobalStubs: loadSetting('metricGlobalStubs', true),
-        adBlockDetailsExpanded: loadSetting('adBlockDetailsExpanded', false),
-        advancedSettingsExpanded: loadSetting('advancedSettingsExpanded', false),
         panelTheme: loadSetting('panelTheme', 'dark'),
         panelCollapsed: loadSetting('panelCollapsed', false),
         panelMiniMode: loadSetting('panelMiniMode', false),
         panelPosition: loadSetting('panelPosition', { top: 12, left: Math.max(8, window.innerWidth - 320) }),
         panelSize: loadSetting('panelSize', { width: 300, height: 0 })
     };
-
-    // Миграция анти-рекламы v5.5: блокировка рекламы/метрик включена по умолчанию,
-    // но в безопасном режиме: не блокируем script/link/fetch/XHR, чтобы не ломать Service Worker,
-    // глушим beacon/img/iframe/клики и заглушаем счётчики после загрузки интерфейса.
-    if (!loadSetting('adBlockSafeDefaultsMigrated_v55', false)) {
-        settings.adBlock = true;
-        settings.adBlockHideElements = true;
-        settings.adBlockBlockNetwork = true;
-        settings.metricBlock = true;
-        settings.metricGlobalStubs = true;
-        saveSetting('adBlock', true);
-        saveSetting('adBlockHideElements', true);
-        saveSetting('adBlockBlockNetwork', true);
-        saveSetting('metricBlock', true);
-        saveSetting('metricGlobalStubs', true);
-        saveSetting('adBlockSafeDefaultsMigrated_v55', true);
-    }
-
-    // v5.5.1: сетевую часть анти-рекламы выключаем один раз по умолчанию.
-    // Причина: NektoMe регистрирует service worker, который сам fetch-ит внешние рекламные/метрические скрипты.
-    // Любой failed/empty response на этапе загрузки может оставлять приложение в полуинициализированном состоянии.
-    // Скрытие рекламных блоков и мягкие заглушки счётчиков остаются включены.
-    if (!loadSetting('adBlockNetworkSafeMigrated_v551', false)) {
-        settings.adBlockBlockNetwork = false;
-        saveSetting('adBlockBlockNetwork', false);
-        saveSetting('adBlockNetworkSafeMigrated_v551', true);
-    }
 
     // Миграция размера: после Material-версии 4.7 окно по умолчанию выше,
     // чтобы больше настроек было видно сразу. Существующий ручной размер меняем один раз.
@@ -317,7 +525,6 @@
         }
         saveSetting('defaultThemeCatppuccinMigrated_v555', true);
     }
-
     // ### Переменные состояния
     let isAutoModeEnabled = true;
     let isVoiceControlEnabled = settings.voiceControl;
@@ -325,6 +532,9 @@
     let globalStream = null;
     let audioContext = null;
     let gainNode = null;
+    let selfListeningSource = null;
+    let selfListeningStream = null;
+    let selfListeningRequestId = 0;
     let micStream = null;
     let recognition = null;
     let voiceHintElement = null;
@@ -334,22 +544,20 @@
     let lastLoudTime = 0;
     let volumeHistory = [];
     let lastAdjustedVolume = TARGET_VOLUME;
-    let pitchNode = null;
-    let pitchAudioContext = null;
-    let pitchSource = null;
-    let pitchWorkletNode = null;
     let conversationTimer = null;
     let currentConversationStart = null;
     let isConversationActive = false;
     let isMicMuted = false;
     let isHeadphonesMuted = false;
     let currentThemeLink = null;
-    let adBlockObserver = null;
-    let isResourceBlockerPatched = false;
-    let metricStubInstalled = false;
+    let currentThemeFallbackStyle = null;
+    let currentThemeExternalLink = null;
+    let currentThemeRequestId = 0;
     let githubParticlesCanvas = null;
     let githubParticlesAnimationId = null;
     let micTestState = null;
+    let micTestMonitorState = null;
+    let micTestMonitorRequestId = 0;
     let micTestRecordingUrl = null;
 
     // Переменные для управления распознаванием
@@ -363,6 +571,40 @@
     let pendingDomMaintenance = false;
     let domMutationBurstCount = 0;
     let lastDomMaintenanceAt = 0;
+    let conversationStartCandidateAt = 0;
+    let conversationEndCandidateAt = 0;
+    let lastConversationSignalAt = 0;
+    let lastObservedSiteTimerSeconds = 0;
+    let activeConversationIdentity = '';
+    let backgroundWorker = null;
+    let backgroundFallbackTimer = null;
+    let queuedDisconnect = null;
+    let pendingAutoConfirmUntil = 0;
+    let pendingDisconnectSource = '';
+    let pendingDisconnectGuardRegistered = false;
+    let pendingDisconnectIntentUntil = 0;
+    let pendingDisconnectIntentSource = '';
+    let seamlessTransitionUntil = 0;
+
+    const CONVERSATION_START_STABLE_MS = 300;
+    const CONVERSATION_END_GRACE_MS = 1200;
+    const CONVERSATION_SIGNAL_LOSS_GRACE_MS = 5000;
+
+    // Простая защита от быстрых скипов:
+    // два разговора короче пяти секунд можно завершить сразу в течение минуты;
+    // на третьем нужно лишь дождаться пяти секунд текущего разговора.
+    const MIN_FAST_DIALOG_DURATION_MS = 5000;
+    const FAST_DISCONNECT_WINDOW_MS = 60000;
+    const MAX_FREE_FAST_DISCONNECTS = 2;
+    const DISCONNECT_HISTORY_KEY = 'AutoNektome_fastDisconnectHistory_v51_simple';
+    const LEGACY_DISCONNECT_HISTORY_KEY = 'AutoNektome_disconnectHistory_v51';
+    const LEGACY_DISCONNECT_PAUSE_KEY = 'AutoNektome_disconnectPauseUntil_v51';
+    let disconnectHistory = loadSessionNumberArray(DISCONNECT_HISTORY_KEY);
+    let autoSearchPauseUntil = 0; // Оставлено для совместимости диагностики/UI; длинных пауз больше нет.
+    try {
+        sessionStorage.removeItem(LEGACY_DISCONNECT_HISTORY_KEY);
+        sessionStorage.removeItem(LEGACY_DISCONNECT_PAUSE_KEY);
+    } catch (error) {}
 
     // ### Утилиты
     const endConversationAudio = new Audio(END_CONVERSATION_SOUND_URL);
@@ -370,48 +612,10 @@
     const startConversationAudio = new Audio(START_CONVERSATION_SOUND_URL);
     startConversationAudio.volume = START_SOUND_VOLUME;
 
-    // Блокировка штатного звука connect.mp3. Работает безопасно даже при @run-at document-start.
-    function muteConnectAudio(audio) {
-        if (!audio || audio.dataset.custom) return;
-        const src = audio.currentSrc || audio.src || '';
-        if (src.includes('connect.mp3')) {
-            audio.src = '';
-            audio.muted = true;
-            audio.pause();
-            audio.removeAttribute('preload');
-            audio.setAttribute('data-blocked', 'true');
-        }
-    }
+  // AutoNektome safe-core compatibility patch v3: штатное аудио NektoMe не изменяется.
+  // Не вызываем pause(), не очищаем src, не ставим muted и не патчим play().
 
-    const blockConnectSound = () => {
-        if (!document.body) {
-            document.addEventListener('DOMContentLoaded', blockConnectSound, { once: true });
-            return;
-        }
 
-        document.querySelectorAll('audio').forEach(muteConnectAudio);
-
-        const connectSoundObserver = new MutationObserver((mutations) => {
-            mutations.forEach((mutation) => {
-                mutation.addedNodes.forEach(node => {
-                    if (node.nodeType !== Node.ELEMENT_NODE) return;
-                    if (node.tagName === 'AUDIO') muteConnectAudio(node);
-                    node.querySelectorAll?.('audio').forEach(muteConnectAudio);
-                });
-            });
-        });
-        connectSoundObserver.observe(document.body, { childList: true, subtree: true });
-    };
-
-    blockConnectSound();
-    const originalPlay = HTMLAudioElement.prototype.play;
-    HTMLAudioElement.prototype.play = function() {
-        const src = this.currentSrc || this.src || '';
-        if (src.includes('connect.mp3') && !this.dataset.custom) {
-            return Promise.resolve();
-        }
-        return originalPlay.apply(this, arguments);
-    };
 
     function loadSetting(key, defaultValue, transform = JSON.parse) {
         const value = localStorage.getItem(key);
@@ -426,6 +630,28 @@
 
     function saveSetting(key, value) {
         localStorage.setItem(key, JSON.stringify(value));
+    }
+
+    function loadSessionNumber(key, fallback = 0) {
+        const value = Number(sessionStorage.getItem(key));
+        return Number.isFinite(value) ? value : fallback;
+    }
+
+    function loadSessionNumberArray(key) {
+        try {
+            const value = JSON.parse(sessionStorage.getItem(key) || '[]');
+            return Array.isArray(value) ? value.map(Number).filter(Number.isFinite) : [];
+        } catch (error) {
+            return [];
+        }
+    }
+
+    function saveDisconnectGuardState() {
+        try {
+            sessionStorage.setItem(DISCONNECT_HISTORY_KEY, JSON.stringify(disconnectHistory));
+            sessionStorage.removeItem(LEGACY_DISCONNECT_HISTORY_KEY);
+            sessionStorage.removeItem(LEGACY_DISCONNECT_PAUSE_KEY);
+        } catch (error) {}
     }
 
     const diagState = {
@@ -525,7 +751,6 @@
                         isAutoModeEnabled,
                         isConversationActive,
                         hasObserver: !!observer,
-                        hasAdBlockObserver: !!adBlockObserver,
                         hasRemoteAudioContext: !!remoteAudioContext,
                         remoteAudioContextState: remoteAudioContext?.state || null,
                         currentAutoVolumeStreamActive: !!currentAutoVolumeStream?.active,
@@ -533,7 +758,12 @@
                         lastAutoClickAt,
                         lastAutoClickSignature,
                         pendingDomMaintenance,
-                        domMutationBurstCount
+                        domMutationBurstCount,
+                        autoSearchPauseUntil,
+                        disconnectsInWindow: disconnectHistory.length,
+                        queuedDisconnectDueAt: queuedDisconnect?.dueAt || null,
+                        pendingAutoConfirmUntil,
+                        backgroundWorkerActive: !!backgroundWorker
                     }
                 };
             },
@@ -549,10 +779,6 @@
             url: location.href,
             userAgent: navigator.userAgent,
             settings: {
-                adBlock: settings.adBlock,
-                adBlockHideElements: settings.adBlockHideElements,
-                adBlockBlockNetwork: settings.adBlockBlockNetwork,
-                metricBlock: settings.metricBlock,
                 autoVolume: settings.autoVolume,
                 voiceControl: settings.voiceControl,
                 selectedTheme: settings.selectedTheme
@@ -602,13 +828,47 @@
         return haystack.includes(` ${needle} `) || haystack.startsWith(`${needle} `) || haystack.endsWith(` ${needle}`);
     }
 
-    function formatDuration(totalSeconds) {
+    function formatCurrentDuration(totalSeconds) {
         const seconds = Math.max(0, Math.floor(Number(totalSeconds) || 0));
-        const h = Math.floor(seconds / 3600);
-        const m = Math.floor((seconds % 3600) / 60);
-        const s = seconds % 60;
-        if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-        return `${m}:${String(s).padStart(2, '0')}`;
+        const hours = Math.floor(seconds / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        const secs = seconds % 60;
+        if (hours > 0) return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+        return `${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    }
+
+    function formatTotalDuration(totalSeconds) {
+        const seconds = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+        const totalHours = Math.floor(seconds / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        const secs = seconds % 60;
+
+        // До часа показываем MM:SS — например, накопленные 10 минут и 5 секунд = 10:05.
+        if (totalHours === 0) {
+            return `${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+        }
+
+        // После часа добавляем часы, не теряя секунд активного разговора.
+        if (totalHours < 24) {
+            return `${String(totalHours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+        }
+
+        // Для очень больших значений используем компактный формат с днями.
+        const days = Math.floor(totalHours / 24);
+        const hours = totalHours % 24;
+        return `${days} д. ${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    }
+
+    function setStatValue(element, text) {
+        if (!element) return;
+        const value = String(text);
+        element.textContent = value;
+        element.title = value;
+        element.dataset.characters = String(value.length);
+        const base = element.classList.contains('an-mini-stat-value') ? 12 : 14;
+        const shrinkAfter = element.classList.contains('an-mini-stat-value') ? 7 : 8;
+        const fontSize = Math.max(8, base - Math.max(0, value.length - shrinkAfter) * 0.55);
+        element.style.fontSize = `${fontSize}px`;
     }
 
     function getSiteThemePalette(themeName = settings.selectedTheme) {
@@ -650,660 +910,16 @@
     }
 
     function startGitHubDarkParticles() {
-        if (githubParticlesCanvas || !document.body) return;
-        diag('info', 'theme.particles.start', { theme: settings.selectedTheme });
-        const canvas = document.createElement('canvas');
-        canvas.id = 'particles-canvas';
-        canvas.setAttribute('aria-hidden', 'true');
-        document.body.prepend(canvas);
-        githubParticlesCanvas = canvas;
-
-        const ctx = canvas.getContext('2d');
-        const particles = [];
-        const particleCount = Math.min(76, Math.max(42, Math.floor((window.innerWidth * window.innerHeight) / 22000)));
-
-        function resize() {
-            const dpr = Math.min(window.devicePixelRatio || 1, 2);
-            canvas.width = Math.floor(window.innerWidth * dpr);
-            canvas.height = Math.floor(window.innerHeight * dpr);
-            canvas.style.width = `${window.innerWidth}px`;
-            canvas.style.height = `${window.innerHeight}px`;
-            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        }
-
-        function seed() {
-            particles.length = 0;
-            for (let i = 0; i < particleCount; i++) {
-                particles.push({
-                    x: Math.random() * window.innerWidth,
-                    y: Math.random() * window.innerHeight,
-                    r: 0.75 + Math.random() * 1.75,
-                    vx: -0.14 + Math.random() * 0.28,
-                    vy: -0.10 + Math.random() * 0.20,
-                    a: 0.14 + Math.random() * 0.44
-                });
-            }
-        }
-
-        function draw() {
-            if (!githubParticlesCanvas) return;
-            const colors = getThemeParticleColors();
-            ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
-            ctx.fillStyle = colors.bg;
-            ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
-
-            for (const p of particles) {
-                p.x += p.vx;
-                p.y += p.vy;
-                if (p.x < -10) p.x = window.innerWidth + 10;
-                if (p.x > window.innerWidth + 10) p.x = -10;
-                if (p.y < -10) p.y = window.innerHeight + 10;
-                if (p.y > window.innerHeight + 10) p.y = -10;
-
-                ctx.beginPath();
-                ctx.fillStyle = `rgba(${colors.rgb}, ${p.a})`;
-                ctx.shadowColor = `rgba(${colors.shadow}, 0.34)`;
-                ctx.shadowBlur = 7;
-                ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-                ctx.fill();
-                ctx.shadowBlur = 0;
-            }
-
-            for (let i = 0; i < particles.length; i++) {
-                for (let j = i + 1; j < particles.length; j++) {
-                    const a = particles[i];
-                    const b = particles[j];
-                    const dx = a.x - b.x;
-                    const dy = a.y - b.y;
-                    const dist = Math.sqrt(dx * dx + dy * dy);
-                    if (dist < 118) {
-                        ctx.strokeStyle = `rgba(${colors.rgb}, ${0.11 * (1 - dist / 118)})`;
-                        ctx.lineWidth = 1;
-                        ctx.beginPath();
-                        ctx.moveTo(a.x, a.y);
-                        ctx.lineTo(b.x, b.y);
-                        ctx.stroke();
-                    }
-                }
-            }
-            githubParticlesAnimationId = requestAnimationFrame(draw);
-        }
-
-        resize();
-        seed();
-        window.addEventListener('resize', () => {
-            if (!githubParticlesCanvas) return;
-            resize();
-            seed();
-        }, { passive: true });
-        draw();
+        // Disabled: canvas changes the page fingerprint during NektoMe checks.
+        stopGitHubDarkParticles();
     }
 
     function syncSiteThemeEffects() {
-        if (settings.selectedTheme !== 'Original' && THEMES[settings.selectedTheme]) startGitHubDarkParticles();
-        else stopGitHubDarkParticles();
+        stopGitHubDarkParticles();
     }
-
-    const AD_BLOCK_SELECTORS = [
-        '.advBox',
-        '.adv-block',
-        '.advMobileBlock',
-        '.horizontal_adv_container',
-        '.fs_wrapper_outer',
-        '.minusheiheight',
-        '[id^="yandex_rtb_"]',
-        '[id^="ya_adv_"]',
-        '[id^="adfox_"]',
-        '[id*="yandex_rtb"]',
-        '[id*="adfox"]',
-        '[class*="yandex_rtb"]',
-        '[data-ad-id]',
-        '[data-name="adWrapper"]',
-        'iframe[src*="yandex"]',
-        'iframe[src*="adfox"]',
-        'iframe[src*="ads"]',
-        'a[href*="yandex.ru/an/count"]',
-        'a[href*="yabs.yandex"]',
-        'img[src*="get-yabs"]',
-        'img[src*="yabs_performance"]'
-    ];
-
-    const AD_CONTAINER_SELECTORS = [
-        '.advBox',
-        '.adv-block',
-        '.advMobileBlock',
-        '.horizontal_adv_container',
-        '.fs_wrapper_outer',
-        '[id^="yandex_rtb_"]',
-        '[id^="ya_adv_"]',
-        '[id^="adfox_"]',
-        '[data-ad-id]',
-        '[data-name="adWrapper"]'
-    ];
-
-    const BLOCKED_AD_URL_PATTERNS = [
-        /(^|\.)yandex\.ru\/ads\//i,
-        /(^|\.)yandex\.ru\/an\/count/i,
-        /(^|\.)an\.yandex\.ru/i,
-        /(^|\.)ads\.adfox\.ru/i,
-        /adfox/i,
-        /header-bidding/i,
-        /context\.js/i,
-        /yabs/i,
-        /get-yabs/i,
-        /yastatic\.net\/safeframe/i,
-        /safeframe-bundles/i,
-        /mytarget/i,
-        /doubleclick\.net/i,
-        /googleadservices\.com/i
-    ];
-
-    const BLOCKED_METRIC_URL_PATTERNS = [
-        /(^|\.)mc\.yandex\.ru/i,
-        /metrika/i,
-        /tag_phono\.js/i,
-        /watch\.js/i,
-        /\/watch\//i,
-        /(^|\.)google-analytics\.com/i,
-        /(^|\.)googletagmanager\.com\/(gtag\/js|gtm\.js)/i,
-        /\/g\/collect/i,
-        /\/collect\?/i,
-        /counter\.yadro\.ru/i,
-        /\/hit;/i,
-        /top\.mail\.ru/i,
-        /vk\.com\/rtrg/i
-    ];
-
-    function normalizeUrlForBlocker(input) {
-        try {
-            if (!input) return '';
-            if (typeof input === 'string') return new URL(input, location.href).href;
-            if (input instanceof URL) return input.href;
-            if (input.url) return new URL(input.url, location.href).href;
-            return new URL(String(input), location.href).href;
-        } catch (error) {
-            return String(input || '');
-        }
-    }
-
-    function getBlockCategory(url) {
-        if (!settings.adBlock || !url) return null;
-        if (settings.adBlockBlockNetwork && BLOCKED_AD_URL_PATTERNS.some(pattern => pattern.test(url))) return 'ad';
-        if (settings.metricBlock && BLOCKED_METRIC_URL_PATTERNS.some(pattern => pattern.test(url))) return 'metric';
-        return null;
-    }
-
-    function isScriptOrStyleResource(url, tagName = '') {
-        const tag = String(tagName || '').toUpperCase();
-        if (tag === 'SCRIPT' || tag === 'LINK') return true;
-        return /(gtag\/js|gtm\.js|watch\.js|tag_phono\.js|context\.js|header-bidding\.js)(?:[?#]|$)/i.test(url)
-            || /\.(?:js|mjs|css)(?:[?#]|$)/i.test(url);
-    }
-
-    function isSameOriginCriticalResource(url) {
-        try {
-            const parsed = new URL(url, location.href);
-            if (parsed.origin !== location.origin) return false;
-            return /^\/audiochat\/(?:js|css|img|images|assets|sound)\//i.test(parsed.pathname)
-                || /^\/sw\.js$/i.test(parsed.pathname)
-                || /^\/audiochat(?:\/|$)/i.test(parsed.pathname);
-        } catch (error) {
-            return false;
-        }
-    }
-
-    // Мягкая блокировка: не трогаем script/link/fetch/XHR, чтобы Service Worker NektoMe не падал на ERR_FAILED.
-    // Вместо этого глушим beacon/img/iframe/рекламные ссылки и ставим безопасные заглушки после загрузки.
-    function shouldBlockRequest(input, channel = 'runtime', tagName = '') {
-        if (!settings.adBlock) return false;
-        const url = normalizeUrlForBlocker(input);
-        if (!url || isSameOriginCriticalResource(url)) return false;
-
-        const category = getBlockCategory(url);
-        if (!category) return false;
-
-        const normalizedChannel = String(channel || 'runtime').toLowerCase();
-        const tag = String(tagName || '').toUpperCase();
-
-        if (normalizedChannel === 'element' || normalizedChannel === 'sanitize') {
-            if (isScriptOrStyleResource(url, tag)) return false;
-            return tag === 'IMG' || tag === 'IFRAME' || tag === 'A' || tag === '';
-        }
-
-        if (normalizedChannel === 'fetch' || normalizedChannel === 'xhr') {
-            // В безопасном режиме не перехватываем fetch/XHR: NektoMe и его Service Worker
-            // болезненно реагируют на failed/empty responses во время инициализации.
-            return false;
-        }
-
-        if (normalizedChannel === 'beacon' || normalizedChannel === 'image') return true;
-
-        return !isScriptOrStyleResource(url, tag);
-    }
-
-    function makeEmptyResponse() {
-        try {
-            return new Response('', {
-                status: 204,
-                statusText: 'AutoNektome blocked',
-                headers: { 'Content-Type': 'text/plain;charset=utf-8' }
-            });
-        } catch (error) {
-            return null;
-        }
-    }
-
-    function installMetricGlobalStubs() {
-        if (!settings.adBlock || !settings.metricGlobalStubs || metricStubInstalled) return;
-        metricStubInstalled = true;
-
-        const noop = () => undefined;
-        const counterStub = {
-            reachGoal: noop,
-            hit: noop,
-            params: noop,
-            userParams: noop,
-            notBounce: noop,
-            addFileExtension: noop,
-            extLink: noop,
-            file: noop
-        };
-
-        const replaceFunctionIfPossible = (name) => {
-            try {
-                const descriptor = Object.getOwnPropertyDescriptor(window, name);
-                if (!descriptor || descriptor.configurable || descriptor.writable) {
-                    window[name] = noop;
-                }
-            } catch (error) {}
-        };
-
-        const patchCounterObject = (counter) => {
-            if (!counter || typeof counter !== 'object') return;
-            Object.keys(counterStub).forEach(method => {
-                try { counter[method] = noop; } catch (error) {}
-            });
-        };
-
-        const applySafeMetricStubs = () => {
-            if (!settings.adBlock || !settings.metricGlobalStubs) return;
-            try {
-                replaceFunctionIfPossible('ym');
-                replaceFunctionIfPossible('gtag');
-
-                if (window.yaCounter34274390) patchCounterObject(window.yaCounter34274390);
-
-                const descriptor = Object.getOwnPropertyDescriptor(window, 'yaCounter34274390');
-                if (!descriptor || descriptor.configurable) {
-                    Object.defineProperty(window, 'yaCounter34274390', {
-                        configurable: true,
-                        get: () => counterStub,
-                        set: value => {
-                            patchCounterObject(value);
-                            return true;
-                        }
-                    });
-                }
-
-                // Не создаём window.Ya заранее: это ломало рекламный стек NektoMe/Service Worker.
-                // Если объект уже появился после загрузки рекламных библиотек — мягко глушим только методы рендера.
-                if (window.Ya?.Context?.AdvManager) {
-                    ['render', 'renderWidget', 'renderDirect', 'destroy', 'getLoadedBanners'].forEach(method => {
-                        try { window.Ya.Context.AdvManager[method] = noop; } catch (error) {}
-                    });
-                }
-            } catch (error) {
-                console.warn('AutoNektome: не удалось мягко заглушить метрики', error);
-            }
-        };
-
-        // Важно: не ставим тяжёлые заглушки на document-start.
-        // Даём NektoMe спокойно загрузить основной интерфейс, потом глушим последующие события аналитики.
-        if (document.readyState === 'complete') {
-            setTimeout(applySafeMetricStubs, 250);
-        } else {
-            window.addEventListener('load', () => setTimeout(applySafeMetricStubs, 250), { once: true });
-        }
-        setTimeout(applySafeMetricStubs, 2500);
-        setTimeout(applySafeMetricStubs, 7000);
-    }
-
-    function installResourceBlockers() {
-        if (isResourceBlockerPatched) return;
-        isResourceBlockerPatched = true;
-
-        // Безопасный анти-трекинг: не патчим fetch/XHR и не подменяем script/link.
-        // Иначе Service Worker сайта получает ERR_FAILED/пустые ответы и может подвесить загрузку.
-
-        const nativeSendBeacon = navigator.sendBeacon?.bind(navigator);
-        if (nativeSendBeacon && !navigator.sendBeacon.__autoNektomeResourcePatched) {
-            const patchedSendBeacon = function(url, data) {
-                if (shouldBlockRequest(url, 'beacon')) {
-                    console.debug('AutoNektome: blocked beacon', normalizeUrlForBlocker(url));
-                    return true;
-                }
-                return nativeSendBeacon(url, data);
-            };
-            patchedSendBeacon.__autoNektomeResourcePatched = true;
-            navigator.sendBeacon = patchedSendBeacon;
-        }
-
-        const nativeSetAttribute = Element.prototype.setAttribute;
-        if (!Element.prototype.__autoNektomeSetAttributePatched) {
-            Element.prototype.setAttribute = function(name, value) {
-                const attr = String(name || '').toLowerCase();
-                const tag = String(this.tagName || '').toUpperCase();
-                if ((attr === 'src' || attr === 'href') && shouldBlockRequest(value, 'element', tag)) {
-                    console.debug('AutoNektome: blocked element resource', normalizeUrlForBlocker(value));
-                    this.dataset.autonektomeBlockedResource = 'true';
-                    if (tag === 'IMG') value = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
-                    else if (tag === 'IFRAME') value = 'about:blank';
-                    else if (tag === 'A') value = 'javascript:void(0)';
-                }
-                return nativeSetAttribute.call(this, name, value);
-            };
-            Element.prototype.__autoNektomeSetAttributePatched = true;
-        }
-
-        function patchUrlProperty(prototype, propertyName, tagName, replacementUrl, channelName) {
-            if (!prototype || prototype[`__autoNektome_${propertyName}_Patched`]) return;
-            const descriptor = Object.getOwnPropertyDescriptor(prototype, propertyName);
-            if (!descriptor || typeof descriptor.set !== 'function' || typeof descriptor.get !== 'function') return;
-            try {
-                Object.defineProperty(prototype, propertyName, {
-                    configurable: true,
-                    enumerable: descriptor.enumerable,
-                    get: descriptor.get,
-                    set(value) {
-                        if (shouldBlockRequest(value, channelName, tagName)) {
-                            console.debug('AutoNektome: blocked resource property', normalizeUrlForBlocker(value));
-                            try { this.dataset.autonektomeBlockedResource = 'true'; } catch (error) {}
-                            return descriptor.set.call(this, replacementUrl);
-                        }
-                        return descriptor.set.call(this, value);
-                    }
-                });
-                prototype[`__autoNektome_${propertyName}_Patched`] = true;
-            } catch (error) {}
-        }
-
-        patchUrlProperty(window.HTMLImageElement?.prototype, 'src', 'IMG', 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==', 'image');
-        patchUrlProperty(window.HTMLIFrameElement?.prototype, 'src', 'IFRAME', 'about:blank', 'element');
-    }
-
-    function ensureAdBlockStyles() {
-        let style = document.getElementById('autonektome-adblock-styles');
-        if (style) return style;
-        style = document.createElement('style');
-        style.id = 'autonektome-adblock-styles';
-        style.textContent = `
-            body.autonektome-adblock-enabled .advBox,
-            body.autonektome-adblock-enabled .adv-block,
-            body.autonektome-adblock-enabled .advMobileBlock,
-            body.autonektome-adblock-enabled .horizontal_adv_container,
-            body.autonektome-adblock-enabled .fs_wrapper_outer,
-            body.autonektome-adblock-enabled .minusheiheight,
-            body.autonektome-adblock-enabled [id^="yandex_rtb_"],
-            body.autonektome-adblock-enabled [id^="ya_adv_"],
-            body.autonektome-adblock-enabled [id^="adfox_"],
-            body.autonektome-adblock-enabled [id*="yandex_rtb"],
-            body.autonektome-adblock-enabled [id*="adfox"],
-            body.autonektome-adblock-enabled [class*="yandex_rtb"],
-            body.autonektome-adblock-enabled [data-ad-id],
-            body.autonektome-adblock-enabled [data-name="adWrapper"],
-            body.autonektome-adblock-enabled iframe[src*="yandex"],
-            body.autonektome-adblock-enabled iframe[src*="adfox"],
-            body.autonektome-adblock-enabled iframe[src*="ads"],
-            body.autonektome-adblock-enabled a[href*="yandex.ru/an/count"],
-            body.autonektome-adblock-enabled a[href*="yabs.yandex"],
-            body.autonektome-adblock-enabled img[src*="get-yabs"],
-            body.autonektome-adblock-enabled img[src*="yabs_performance"] {
-                display: none !important;
-                visibility: hidden !important;
-                opacity: 0 !important;
-                width: 0 !important;
-                max-width: 0 !important;
-                height: 0 !important;
-                max-height: 0 !important;
-                min-height: 0 !important;
-                margin: 0 !important;
-                padding: 0 !important;
-                border: 0 !important;
-                overflow: hidden !important;
-                pointer-events: none !important;
-            }
-
-            body.autonektome-adblock-enabled .hidden-xs.hidden-sm.col-sm-1.col-md-4.col-lg-3:has(.adv-block),
-            body.autonektome-adblock-enabled .hidden-xs.hidden-sm.col-sm-1.col-md-4.col-lg-3:has([id^="yandex_rtb_"]),
-            body.autonektome-adblock-enabled .hidden-xs.hidden-sm.col-sm-1.col-md-4.col-lg-3:has([id^="adfox_"]) {
-                display: none !important;
-            }
-        `;
-        (document.head || document.documentElement).appendChild(style);
-        return style;
-    }
-
-    function isCriticalLayoutElement(element) {
-        if (!element || element.nodeType !== Node.ELEMENT_NODE) return true;
-        if (element.matches?.('html, body, #app, #audio-chat-container, .wraps, .chat_container, .outer-container, .audio-chat, .main-panel, .centerToSearchBlock')) return true;
-        if (element.closest?.('#settings-container')) return true;
-        return false;
-    }
-
-    function hideAdElement(element) {
-        if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
-        if (isCriticalLayoutElement(element)) {
-            diag('warn', 'adBlock.skipCriticalHide', {
-                tag: element.tagName,
-                id: element.id || '',
-                className: String(element.className || '').slice(0, 160)
-            }, { throttleMs: 1000, key: `critical-hide:${element.tagName}:${element.id}:${element.className}` });
-            return;
-        }
-
-        let target = element;
-        if (element.matches?.('a[href*="yandex.ru/an/count"], a[href*="yabs.yandex"], img[src*="get-yabs"], img[src*="yabs_performance"]')) {
-            target = element.closest('[data-ad-id], [data-name="adWrapper"], .advBox, .adv-block') || element;
-        }
-        if (isCriticalLayoutElement(target)) return;
-
-        if (!target.dataset.autonektomeAdHidden) {
-            target.dataset.autonektomeOriginalStyle = target.getAttribute('style') || '';
-            target.dataset.autonektomeAdHidden = 'true';
-            diag('debug', 'adBlock.hideElement', {
-                tag: target.tagName,
-                id: target.id || '',
-                className: String(target.className || '').slice(0, 160)
-            }, { throttleMs: 750, key: `hide:${target.tagName}:${target.id}:${target.className}` });
-        }
-        target.style.setProperty('display', 'none', 'important');
-        target.style.setProperty('visibility', 'hidden', 'important');
-        target.style.setProperty('height', '0', 'important');
-        target.style.setProperty('min-height', '0', 'important');
-        target.style.setProperty('max-height', '0', 'important');
-        target.style.setProperty('margin', '0', 'important');
-        target.style.setProperty('padding', '0', 'important');
-
-        const adColumn = target.closest?.('.hidden-xs.hidden-sm.col-sm-1.col-md-4.col-lg-3');
-        if (adColumn && !adColumn.querySelector('#settings-container') && !isCriticalLayoutElement(adColumn)) {
-            if (!adColumn.dataset.autonektomeAdHidden) {
-                adColumn.dataset.autonektomeOriginalStyle = adColumn.getAttribute('style') || '';
-                adColumn.dataset.autonektomeAdHidden = 'true';
-            }
-            adColumn.style.setProperty('display', 'none', 'important');
-        }
-    }
-
-    function hideAdElements(root = document) {
-        if (!settings.adBlock || !settings.adBlockHideElements || !root?.querySelectorAll) return;
-        const started = performance.now();
-        let hiddenAttempts = 0;
-        AD_BLOCK_SELECTORS.forEach(selector => {
-            try {
-                if (root.matches?.(selector)) {
-                    hiddenAttempts++;
-                    hideAdElement(root);
-                }
-                root.querySelectorAll(selector).forEach(element => {
-                    hiddenAttempts++;
-                    hideAdElement(element);
-                });
-            } catch (error) {
-                diag('warn', 'adBlock.selectorError', { selector, message: error?.message || String(error) }, { throttleMs: 1000, key: `selector:${selector}` });
-            }
-        });
-        const elapsed = performance.now() - started;
-        if (elapsed > 20 || hiddenAttempts > 25) {
-            diag('warn', 'adBlock.hideScan.slow', { elapsedMs: Math.round(elapsed), hiddenAttempts }, { throttleMs: 1000 });
-        } else {
-            diag('debug', 'adBlock.hideScan', { elapsedMs: Math.round(elapsed), hiddenAttempts }, { throttleMs: 1500 });
-        }
-    }
-
-    function sanitizeBlockedResources(root = document) {
-        if (!settings.adBlock || !root?.querySelectorAll) return;
-        const started = performance.now();
-        const candidates = [];
-        if (root.matches?.('iframe[src], img[src], a[href]')) candidates.push(root);
-        root.querySelectorAll?.('iframe[src], img[src], a[href]').forEach(node => candidates.push(node));
-
-        let blocked = 0;
-        candidates.forEach(node => {
-            if (isCriticalLayoutElement(node)) return;
-            const url = node.src || node.href || node.getAttribute('src') || node.getAttribute('href');
-            if (!shouldBlockRequest(url, 'sanitize', node.tagName)) return;
-            node.dataset.autonektomeBlockedResource = 'true';
-            blocked++;
-            diag('debug', 'adBlock.sanitizeResource', {
-                tag: node.tagName,
-                url: normalizeUrlForBlocker(url).slice(0, 220)
-            }, { throttleMs: 500, key: `sanitize:${node.tagName}:${normalizeUrlForBlocker(url)}` });
-
-            if (node.tagName === 'IMG') {
-                node.src = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
-                hideAdElement(node);
-                return;
-            }
-            if (node.tagName === 'A') {
-                hideAdElement(node);
-                return;
-            }
-            node.remove();
-        });
-        const elapsed = performance.now() - started;
-        if (elapsed > 20 || blocked > 10) {
-            diag('warn', 'adBlock.sanitizeScan.slow', { elapsedMs: Math.round(elapsed), candidates: candidates.length, blocked }, { throttleMs: 1000 });
-        }
-    }
-
-    function restoreHiddenAds() {
-        document.querySelectorAll('[data-autonektome-ad-hidden="true"]').forEach(element => {
-            const originalStyle = element.dataset.autonektomeOriginalStyle;
-            if (originalStyle) element.setAttribute('style', originalStyle);
-            else element.removeAttribute('style');
-            delete element.dataset.autonektomeOriginalStyle;
-            delete element.dataset.autonektomeAdHidden;
-        });
-    }
-
-    function startAdBlockObserver() {
-        if (adBlockObserver || !document.body) return;
-        let scheduled = false;
-        let pendingRoots = [];
-
-        function flushAdBlockRoots() {
-            scheduled = false;
-            const roots = pendingRoots.splice(0, 80);
-            if (!settings.adBlock) return;
-            const started = performance.now();
-            roots.forEach(node => {
-                if (!node || node.nodeType !== Node.ELEMENT_NODE) return;
-                if (settings.adBlockBlockNetwork || settings.metricBlock) sanitizeBlockedResources(node);
-                hideAdElements(node);
-            });
-            const elapsed = performance.now() - started;
-            diag(elapsed > 25 ? 'warn' : 'debug', 'adBlock.observer.flush', {
-                roots: roots.length,
-                dropped: pendingRoots.length,
-                elapsedMs: Math.round(elapsed)
-            }, { throttleMs: 1000 });
-            pendingRoots.length = 0;
-        }
-
-        adBlockObserver = new MutationObserver(mutations => {
-            if (!settings.adBlock) return;
-            let added = 0;
-            mutations.forEach(mutation => {
-                mutation.addedNodes.forEach(node => {
-                    if (node.nodeType !== Node.ELEMENT_NODE) return;
-                    added++;
-                    if (pendingRoots.length < 200) pendingRoots.push(node);
-                });
-            });
-            if (!added) return;
-            diag('debug', 'adBlock.observer.mutations', { mutations: mutations.length, added }, { throttleMs: 1000 });
-            if (!scheduled) {
-                scheduled = true;
-                requestAnimationFrame(flushAdBlockRoots);
-            }
-        });
-        adBlockObserver.observe(document.body, { childList: true, subtree: true });
-        diag('info', 'adBlock.observer.started');
-    }
-
-    function applyAdBlock() {
-        const started = performance.now();
-        diag('info', 'adBlock.apply', {
-            adBlock: settings.adBlock,
-            hideElements: settings.adBlockHideElements,
-            blockNetwork: settings.adBlockBlockNetwork,
-            metricBlock: settings.metricBlock,
-            metricGlobalStubs: settings.metricGlobalStubs,
-            hasBody: !!document.body
-        }, { throttleMs: 500 });
-
-        if (settings.adBlock) {
-            if (settings.adBlockBlockNetwork || settings.metricBlock) installResourceBlockers();
-            if (settings.metricGlobalStubs) installMetricGlobalStubs();
-        }
-
-        if (!document.body) {
-            document.addEventListener('DOMContentLoaded', applyAdBlock, { once: true });
-            return;
-        }
-
-        document.body.classList.toggle('autonektome-adblock-enabled', !!(settings.adBlock && settings.adBlockHideElements));
-
-        if (settings.adBlock) {
-            if (settings.adBlockHideElements) {
-                ensureAdBlockStyles();
-                hideAdElements(document);
-            } else {
-                document.getElementById('autonektome-adblock-styles')?.remove();
-                restoreHiddenAds();
-            }
-            if (settings.adBlockBlockNetwork || settings.metricBlock) sanitizeBlockedResources(document);
-            startAdBlockObserver();
-        } else {
-            document.getElementById('autonektome-adblock-styles')?.remove();
-            if (adBlockObserver) {
-                adBlockObserver.disconnect();
-                adBlockObserver = null;
-                diag('info', 'adBlock.observer.stopped');
-            }
-            restoreHiddenAds();
-        }
-
-        const elapsed = performance.now() - started;
-        diag(elapsed > 30 ? 'warn' : 'debug', 'adBlock.apply.done', { elapsedMs: Math.round(elapsed) }, { throttleMs: 500 });
-    }
-
-    // Ставим сетевые перехваты максимально рано. DOM-часть применится после появления body.
-    applyAdBlock();
 
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     let nativeGetUserMedia = null;
-    let isGetUserMediaPatched = false;
 
     function getAudioConstraints() {
         return {
@@ -1328,15 +944,14 @@
     }
 
     function syncMicMuteState() {
-        const streams = [micStream, globalStream].filter(Boolean);
-        const seenTracks = new Set();
-        streams.forEach(stream => {
-            stream.getAudioTracks().forEach(track => {
-                if (seenTracks.has(track)) return;
-                seenTracks.add(track);
-                track.enabled = !isMicMuted;
-            });
-        });
+        [micStream, globalStream, selfListeningStream]
+            .filter(Boolean)
+            .forEach(stream => __autoNektomeMediaSafety.registerStream(stream));
+        __autoNektomeMediaSafety.setMuted(isMicMuted);
+        diag('info', 'microphone.muteStateApplied', {
+            muted: isMicMuted,
+            trackedAudioTracks: __autoNektomeMediaSafety.getLiveTrackCount()
+        }, { throttleMs: 500 });
     }
 
 
@@ -1350,7 +965,6 @@
             body.autonektome-site-themed .navbar-fixed-top,
             body.autonektome-site-themed .container.swipes,
             body.autonektome-site-themed .tabs_type_chats,
-            body.autonektome-site-themed .header.header_chat,
             body.autonektome-site-themed .chat-step.idle .description,
             body.autonektome-site-themed .audio-chat .description,
             body.autonektome-site-themed .autonektome-hide-site-chrome,
@@ -1531,7 +1145,6 @@
             '.navbar-fixed-top',
             '.container.swipes',
             '.tabs_type_chats',
-            '.header.header_chat',
             '.chat-step.idle .description',
             '.audio-chat .description'
         ];
@@ -1607,42 +1220,178 @@
     }
 
     // ### Управление темами
+    function getThemeCacheKey(themeName) {
+        return `autonektomeThemeCss:${String(themeName || '').replace(/\s+/g, '-').toLowerCase()}`;
+    }
+
+    function removeActiveThemeNodes() {
+        currentThemeRequestId++;
+        [currentThemeLink, currentThemeFallbackStyle, currentThemeExternalLink].forEach(node => {
+            try { node?.remove?.(); } catch (error) {}
+        });
+        document.querySelectorAll('#custom-theme-style, #custom-theme-fallback-style, #custom-theme-link').forEach(node => node.remove());
+        currentThemeLink = null;
+        currentThemeFallbackStyle = null;
+        currentThemeExternalLink = null;
+    }
+
+    function buildThemeFallbackCss(themeName) {
+        const fallback = SITE_THEME_FALLBACKS[themeName];
+        const palette = getSiteThemePalette(themeName);
+        if (!fallback || themeName === 'Original') return '';
+
+        return `
+            :root {
+                --an-site-bg: ${fallback.bg};
+                --an-site-bg-2: ${fallback.bg2};
+                --an-site-surface: ${fallback.surface};
+                --an-site-surface-2: ${fallback.surface2};
+                --an-site-text: ${fallback.text};
+                --an-site-muted: ${fallback.muted};
+                --an-site-accent: ${palette.primaryLight};
+                --an-site-accent-2: ${palette.accent};
+            }
+            html, body, body.night_theme {
+                min-height: 100% !important;
+                background:
+                    radial-gradient(circle at 18% 4%, color-mix(in srgb, var(--an-site-accent) 15%, transparent), transparent 34%),
+                    radial-gradient(circle at 82% 0%, color-mix(in srgb, var(--an-site-accent-2) 11%, transparent), transparent 30%),
+                    linear-gradient(180deg, var(--an-site-bg) 0%, var(--an-site-bg-2) 52%, var(--an-site-bg) 100%) !important;
+                color: var(--an-site-text) !important;
+            }
+            body.autonektome-site-themed .wraps,
+            body.autonektome-site-themed .chat_container,
+            body.autonektome-site-themed .outer-container,
+            body.autonektome-site-themed #audio-chat-container,
+            body.autonektome-site-themed .audio-chat,
+            body.autonektome-site-themed .chat-step,
+            body.autonektome-site-themed .centerToSearchBlock {
+                background: transparent !important;
+                color: var(--an-site-text) !important;
+            }
+            body.autonektome-site-themed .audio-chat .main-panel,
+            body.autonektome-site-themed .audio-chat .window_chat_statuss,
+            body.autonektome-site-themed .audio-chat .opened-label,
+            body.autonektome-site-themed .audio-chat .need-update-label,
+            body.autonektome-site-themed .swal2-popup {
+                background: linear-gradient(180deg, color-mix(in srgb, var(--an-site-surface) 96%, transparent), color-mix(in srgb, var(--an-site-surface-2) 92%, transparent)) !important;
+                border-color: color-mix(in srgb, var(--an-site-accent) 28%, rgba(255,255,255,.10)) !important;
+                color: var(--an-site-text) !important;
+            }
+            body.autonektome-site-themed .audio-chat button,
+            body.autonektome-site-themed .audio-chat .btn,
+            body.autonektome-site-themed .audio-chat input,
+            body.autonektome-site-themed .audio-chat select,
+            body.autonektome-site-themed .audio-chat textarea {
+                background-color: color-mix(in srgb, var(--an-site-surface-2) 90%, transparent) !important;
+                border-color: color-mix(in srgb, var(--an-site-accent) 30%, rgba(255,255,255,.12)) !important;
+                color: var(--an-site-text) !important;
+            }
+            body.autonektome-site-themed .audio-chat a,
+            body.autonektome-site-themed .audio-chat .talking-count,
+            body.autonektome-site-themed .audio-chat h1,
+            body.autonektome-site-themed .audio-chat .title {
+                color: var(--an-site-accent) !important;
+            }
+        `;
+    }
+
+    function installThemeCss(css, requestId, source = 'remote') {
+        if (!css || requestId !== currentThemeRequestId) return false;
+        const styleElement = document.createElement('style');
+        styleElement.id = 'custom-theme-style';
+        styleElement.dataset.source = source;
+        styleElement.textContent = css;
+        (document.head || document.documentElement).appendChild(styleElement);
+
+        currentThemeLink?.remove?.();
+        currentThemeLink = styleElement;
+        currentThemeExternalLink?.remove?.();
+        currentThemeExternalLink = null;
+        return true;
+    }
+
     function applyTheme(themeName) {
-        diag('info', 'theme.apply', { themeName }, { throttleMs: 500 });
-        settings.selectedTheme = themeName;
-        saveSetting('selectedTheme', themeName);
+        const safeThemeName = Object.prototype.hasOwnProperty.call(THEMES, themeName) ? themeName : 'Original';
+        diag('info', 'theme.apply', { themeName: safeThemeName }, { throttleMs: 500 });
+        settings.selectedTheme = safeThemeName;
+        saveSetting('selectedTheme', safeThemeName);
+
+        removeActiveThemeNodes();
+        const requestId = currentThemeRequestId;
         applySiteChromePolish();
-        if (currentThemeLink) {
-            currentThemeLink.remove();
-            currentThemeLink = null;
-        }
 
         const loadingIndicator = document.querySelector('#site-theme-loading');
-        if (loadingIndicator) loadingIndicator.style.display = 'block';
+        if (loadingIndicator) loadingIndicator.style.display = safeThemeName === 'Original' ? 'none' : 'block';
 
-        if (themeName !== 'Original' && THEMES[themeName]) {
-            const styleElement = document.createElement('style');
-            styleElement.id = 'custom-theme-style';
+        if (safeThemeName !== 'Original' && THEMES[safeThemeName]) {
+            // Мгновенный встроенный слой: тема видна сразу и не зависит от сети.
+            const fallbackCss = buildThemeFallbackCss(safeThemeName);
+            if (fallbackCss) {
+                currentThemeFallbackStyle = document.createElement('style');
+                currentThemeFallbackStyle.id = 'custom-theme-fallback-style';
+                currentThemeFallbackStyle.textContent = fallbackCss;
+                (document.head || document.documentElement).appendChild(currentThemeFallbackStyle);
+            }
 
-            fetch(THEMES[themeName])
+            // Сначала используем последнюю успешно загруженную копию полного CSS.
+            try {
+                const cachedCss = localStorage.getItem(getThemeCacheKey(safeThemeName));
+                if (cachedCss) installThemeCss(cachedCss, requestId, 'cache');
+            } catch (error) {
+                diag('warn', 'theme.cache.read.error', { themeName: safeThemeName, message: error?.message || String(error) });
+            }
+
+            // Параллельно подключаем обычный stylesheet. Это работает в окружениях,
+            // где fetch блокируется CSP, но загрузка стилей разрешена.
+            const externalLink = document.createElement('link');
+            externalLink.id = 'custom-theme-link';
+            externalLink.rel = 'stylesheet';
+            externalLink.href = `${THEMES[safeThemeName]}?anv=${encodeURIComponent(SCRIPT_VERSION)}`;
+            externalLink.crossOrigin = 'anonymous';
+            externalLink.onload = () => {
+                if (requestId !== currentThemeRequestId) return;
+                if (loadingIndicator) loadingIndicator.style.display = 'none';
+                diag('info', 'theme.link.loaded', { themeName: safeThemeName });
+            };
+            externalLink.onerror = () => {
+                if (requestId !== currentThemeRequestId) return;
+                diag('warn', 'theme.link.error', { themeName: safeThemeName });
+            };
+            (document.head || document.documentElement).appendChild(externalLink);
+            currentThemeExternalLink = externalLink;
+
+            // Fetch нужен для кеша и для встраивания CSS, когда external stylesheet
+            // режется политикой style-src. Ошибка не отменяет встроенную тему.
+            const controller = typeof AbortController === 'function' ? new AbortController() : null;
+            const timeoutId = setTimeout(() => controller?.abort?.(), 9000);
+            fetch(THEMES[safeThemeName], {
+                cache: 'no-store',
+                credentials: 'omit',
+                mode: 'cors',
+                signal: controller?.signal
+            })
                 .then(response => {
-                    if (!response.ok) throw new Error('Ошибка загрузки CSS');
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
                     return response.text();
                 })
                 .then(css => {
-                    styleElement.textContent = css;
-                    document.head.appendChild(styleElement);
-                    currentThemeLink = styleElement;
+                    if (requestId !== currentThemeRequestId) return;
+                    if (!css || css.length < 80) throw new Error('Получен пустой CSS темы');
+                    installThemeCss(css, requestId, 'network');
+                    try { localStorage.setItem(getThemeCacheKey(safeThemeName), css); } catch (error) {}
                     if (loadingIndicator) loadingIndicator.style.display = 'none';
+                    diag('info', 'theme.fetch.loaded', { themeName: safeThemeName, bytes: css.length });
                 })
                 .catch(error => {
-                    console.error('Ошибка при загрузке темы:', error);
+                    if (requestId !== currentThemeRequestId) return;
+                    diag('warn', 'theme.fetch.error', { themeName: safeThemeName, message: error?.message || String(error) });
+                    // Встроенный fallback уже применён, поэтому не сбрасываем оформление.
                     if (loadingIndicator) loadingIndicator.style.display = 'none';
-                });
-        } else if (themeName === 'Original') {
-            const existingStyles = document.querySelectorAll('style[id="custom-theme-style"]');
-            existingStyles.forEach(style => style.remove());
-            currentThemeLink = null;
+                })
+                .finally(() => clearTimeout(timeoutId));
+        } else {
+            document.body?.classList.remove('autonektome-site-themed');
             if (loadingIndicator) loadingIndicator.style.display = 'none';
         }
 
@@ -1713,48 +1462,6 @@
         return themeContainer;
     }
 
-    // ### AudioWorklet процессор для pitch shifting
-    const pitchShiftWorkletCode = `
-        class PitchShiftProcessor extends AudioWorkletProcessor {
-            constructor() {
-                super();
-                this.bufferSize = 4096;
-                this.buffer = new Float32Array(this.bufferSize);
-                this.writeIndex = 0;
-                this.readIndex = 0;
-                this.pitchFactor = 1.0;
-                this.port.onmessage = (event) => {
-                    this.pitchFactor = event.data;
-                };
-            }
-
-            process(inputs, outputs, parameters) {
-                const input = inputs[0][0];
-                const output = outputs[0][0];
-
-                if (!input || !output) return true;
-
-                for (let i = 0; i < input.length; i++) {
-                    this.buffer[this.writeIndex] = input[i];
-                    this.writeIndex = (this.writeIndex + 1) % this.bufferSize;
-                }
-
-                for (let i = 0; i < output.length; i++) {
-                    const intIndex = Math.floor(this.readIndex);
-                    const frac = this.readIndex - intIndex;
-                    const sample1 = this.buffer[intIndex % this.bufferSize];
-                    const sample2 = this.buffer[(intIndex + 1) % this.bufferSize];
-                    output[i] = sample1 + (sample2 - sample1) * frac;
-                    this.readIndex = (this.readIndex + this.pitchFactor) % this.bufferSize;
-                }
-
-                return true;
-            }
-        }
-
-        registerProcessor('pitch-shift-processor', PitchShiftProcessor);
-    `;
-
     // ### Функции авторежима
     function isButtonUsable(button) {
         if (!button || button.disabled) return false;
@@ -1779,14 +1486,309 @@
         return document.querySelector('.callScreen.callFinished, .chat-step.finished, .chat-step.finish, .chat-step.hangup, .callFinished, .hangup');
     }
 
+    function showRuntimeToast(message, duration = 3500) {
+        let toast = document.getElementById('autonektome-runtime-toast');
+        if (!toast) {
+            toast = document.createElement('div');
+            toast.id = 'autonektome-runtime-toast';
+            toast.className = 'autonektome-runtime-toast';
+            document.body?.appendChild(toast);
+        }
+        toast.textContent = message;
+        const token = String(Date.now());
+        toast.dataset.token = token;
+        setTimeout(() => {
+            if (toast?.dataset.token === token) toast.remove();
+        }, duration);
+    }
+
+    function pruneDisconnectHistory(now = Date.now()) {
+        const previousLength = disconnectHistory.length;
+        disconnectHistory = disconnectHistory.filter(timestamp => now - timestamp < FAST_DISCONNECT_WINDOW_MS);
+        autoSearchPauseUntil = 0;
+        if (previousLength !== disconnectHistory.length) saveDisconnectGuardState();
+    }
+
+    function getCurrentConversationAgeMs(now = Date.now()) {
+        if (currentConversationStart) {
+            return Math.max(0, now - currentConversationStart);
+        }
+
+        const timerElement = document.querySelector('.callScreen__time, .timer-label');
+        const siteTimerSeconds = timerElement ? parseDisplayedDuration(timerElement.textContent) : 0;
+        if (siteTimerSeconds > 0) return siteTimerSeconds * 1000;
+        if (conversationStartCandidateAt) return Math.max(0, now - conversationStartCandidateAt);
+
+        // Кнопка завершения уже существует, но жизненный цикл ещё мог не успеть
+        // стабилизироваться. Считаем такой разговор только что начавшимся.
+        return getDisconnectButton(document) ? 0 : Number.POSITIVE_INFINITY;
+    }
+
+    function getDisconnectProtectionDelay(now = Date.now()) {
+        if (!settings.disconnectProtection) return 0;
+        pruneDisconnectHistory(now);
+
+        // Первые два подтверждённых быстрых скипа в минутном окне разрешены.
+        if (disconnectHistory.length < MAX_FREE_FAST_DISCONNECTS) return 0;
+
+        const conversationAge = getCurrentConversationAgeMs(now);
+        if (!Number.isFinite(conversationAge) || conversationAge >= MIN_FAST_DIALOG_DURATION_MS) return 0;
+        return Math.max(0, MIN_FAST_DIALOG_DURATION_MS - conversationAge);
+    }
+
+    function registerProtectedDisconnect(source = 'unknown', now = Date.now()) {
+        if (!settings.disconnectProtection) return false;
+        pruneDisconnectHistory(now);
+
+        // В историю попадает только фактически подтверждённое завершение
+        // разговора короче пяти секунд. Открытие/закрытие модального окна не считается.
+        const conversationAge = getCurrentConversationAgeMs(now);
+        if (!Number.isFinite(conversationAge) || conversationAge >= MIN_FAST_DIALOG_DURATION_MS) {
+            diag('debug', 'disconnectGuard.notFast', { source, conversationAge });
+            return false;
+        }
+
+        const lastDisconnectAt = disconnectHistory.length ? disconnectHistory[disconnectHistory.length - 1] : 0;
+        if (lastDisconnectAt && now - lastDisconnectAt < 750) {
+            diag('debug', 'disconnectGuard.skipDuplicate', { source, agoMs: now - lastDisconnectAt }, { throttleMs: 500 });
+            return true;
+        }
+
+        disconnectHistory.push(now);
+        saveDisconnectGuardState();
+        diag('info', 'disconnectGuard.fastRegistered', {
+            source,
+            conversationAge,
+            countInWindow: disconnectHistory.length
+        });
+        return true;
+    }
+
+    function isAutoSearchSafetyPaused() {
+        // Длинные защитные паузы удалены. Автопоиск никогда не блокируется
+        // на десятки секунд: ограничение действует только до пятой секунды
+        // конкретного текущего разговора.
+        autoSearchPauseUntil = 0;
+        return false;
+    }
+
+    function markDisconnectIntent(source = 'unknown', durationMs = 12000) {
+        pendingDisconnectIntentSource = source;
+        pendingDisconnectIntentUntil = Date.now() + durationMs;
+    }
+
+    function clearDisconnectIntent() {
+        pendingDisconnectIntentSource = '';
+        pendingDisconnectIntentUntil = 0;
+    }
+
+    function getDisconnectButton(target = document) {
+        if (target instanceof Element) {
+            return target.closest('button.callScreen__cancelCallBtn.btn.danger2.cancelCallBtnNoMess, button.btn.btn-lg.stop-talk-button, button.stop-talk-button');
+        }
+        return document.querySelector('button.callScreen__cancelCallBtn.btn.danger2.cancelCallBtnNoMess, button.btn.btn-lg.stop-talk-button, button.stop-talk-button');
+    }
+
+    function findDisconnectConfirmButton() {
+        const candidates = Array.from(document.querySelectorAll('button.swal2-confirm.swal2-styled, button.swal2-confirm'));
+        return candidates.find(button => {
+            const text = normalizeSpeechText(button.textContent || '');
+            return !button.disabled && (!text || text === 'да' || text.includes('подтверд') || text.includes('заверш'));
+        }) || candidates.find(button => !button.disabled) || null;
+    }
+
+    function beginAutoConfirmWindow(source = 'unknown', guardRegistered = false) {
+        pendingDisconnectSource = source;
+        pendingDisconnectGuardRegistered = !!guardRegistered;
+        pendingAutoConfirmUntil = Date.now() + 3500;
+        markDisconnectIntent(source);
+        document.body?.classList.add('autonektome-auto-confirm-pending');
+        confirmDisconnectIfNeeded(`begin:${source}`);
+    }
+
+    function beginSeamlessTransition() {
+        seamlessTransitionUntil = Date.now() + 4000;
+        document.body?.classList.add('autonektome-seamless-transition');
+    }
+
+    function endSeamlessTransition() {
+        seamlessTransitionUntil = 0;
+        document.body?.classList.remove('autonektome-seamless-transition');
+    }
+
+    function confirmDisconnectIfNeeded(reason = 'maintenance') {
+        if (!pendingAutoConfirmUntil) return false;
+        const now = Date.now();
+        if (now > pendingAutoConfirmUntil) {
+            pendingAutoConfirmUntil = 0;
+            pendingDisconnectSource = '';
+            pendingDisconnectGuardRegistered = false;
+            clearDisconnectIntent();
+            document.body?.classList.remove('autonektome-auto-confirm-pending');
+            return false;
+        }
+
+        const confirmButton = findDisconnectConfirmButton();
+        if (!confirmButton) return false;
+
+        const source = pendingDisconnectSource || pendingDisconnectIntentSource || 'unknown';
+        pendingAutoConfirmUntil = 0;
+        pendingDisconnectSource = '';
+        pendingDisconnectGuardRegistered = false;
+        if (isAutoModeEnabled) beginSeamlessTransition();
+
+        // История быстрого скипа регистрируется capture-обработчиком самого
+        // подтверждения. Поэтому отменённое окно никогда не расходует лимит.
+        confirmButton.click();
+        clearDisconnectIntent();
+        setTimeout(() => document.body?.classList.remove('autonektome-auto-confirm-pending'), 400);
+        diag('info', 'disconnect.autoConfirmed', { reason, source });
+        return true;
+    }
+
+    function resolveQueuedDisconnectButton(queued) {
+        if (queued?.button?.isConnected && isButtonUsable(queued.button)) return queued.button;
+        const currentButton = getDisconnectButton(document);
+        return currentButton && isButtonUsable(currentButton) ? currentButton : null;
+    }
+
+    function executeProtectedDisconnect(button, source = 'automatic', autoConfirm = true, reason = 'immediate') {
+        const liveButton = button?.isConnected && isButtonUsable(button) ? button : getDisconnectButton(document);
+        if (!liveButton || !isButtonUsable(liveButton)) {
+            diag('warn', 'disconnect.execute.noButton', { source, reason }, { throttleMs: 1000 });
+            return false;
+        }
+
+        liveButton.dataset.autonektomeDisconnectBypass = 'true';
+        markDisconnectIntent(source);
+        if (autoConfirm) beginAutoConfirmWindow(source, false);
+        liveButton.click();
+        diag('info', 'disconnect.executed', { source, reason, autoConfirm });
+        return true;
+    }
+
+    function queueProtectedDisconnect(button, source = 'automatic') {
+        if (!button || !isButtonUsable(button)) return false;
+
+        const now = Date.now();
+        if (queuedDisconnect && now < queuedDisconnect.dueAt) {
+            const remaining = Math.max(1, Math.ceil((queuedDisconnect.dueAt - now) / 1000));
+            showRuntimeToast(`Быстрый скип: можно завершить через ${remaining} с`, Math.min(5000, queuedDisconnect.dueAt - now + 500));
+            return true;
+        }
+
+        const delay = getDisconnectProtectionDelay(now);
+        if (delay > 0) {
+            // Очередь нужна только голосовой/автоматической команде. Ручной клик
+            // не запоминается: пользователь просто нажимает ещё раз после 5 секунд.
+            queuedDisconnect = {
+                button,
+                source,
+                autoConfirm: true,
+                dueAt: now + delay,
+                expiresAt: now + delay + 5000
+            };
+            showRuntimeToast(`Быстрый скип: можно завершить через ${Math.max(1, Math.ceil(delay / 1000))} с`, Math.min(5000, delay + 500));
+            diag('warn', 'disconnect.delayedUntilFiveSeconds', { source, delay });
+            return true;
+        }
+
+        queuedDisconnect = null;
+        return executeProtectedDisconnect(button, source, true, 'queue-immediate');
+    }
+
+    function flushQueuedDisconnect(reason = 'background') {
+        if (!queuedDisconnect) return false;
+
+        const now = Date.now();
+        if (now < queuedDisconnect.dueAt) return false;
+
+        const queued = queuedDisconnect;
+        const button = resolveQueuedDisconnectButton(queued);
+        if (!button) {
+            if (now < queued.expiresAt) return false;
+            queuedDisconnect = null;
+            diag('warn', 'disconnect.queueExpired', { reason, source: queued.source });
+            return false;
+        }
+
+        queuedDisconnect = null;
+        return executeProtectedDisconnect(button, queued.source, queued.autoConfirm, `queued:${reason}`);
+    }
+
+    function handleDisconnectClickCapture(event) {
+        const clickedButton = event.target?.closest?.('button');
+        const now = Date.now();
+
+        // Регистрируем только реальное подтверждение завершения. Если пользователь
+        // открыл окно и нажал «Нет»/закрыл его, история быстрых скипов не меняется.
+        if (clickedButton?.matches?.('button.swal2-confirm.swal2-styled, button.swal2-confirm')) {
+            if (pendingDisconnectIntentUntil > now) {
+                registerProtectedDisconnect(pendingDisconnectIntentSource || 'confirmed', now);
+                clearDisconnectIntent();
+            }
+            return;
+        }
+
+        if (clickedButton?.matches?.('button.swal2-cancel, button.swal2-close, .swal2-cancel, .swal2-close')) {
+            clearDisconnectIntent();
+            pendingAutoConfirmUntil = 0;
+            pendingDisconnectSource = '';
+            pendingDisconnectGuardRegistered = false;
+            document.body?.classList.remove('autonektome-auto-confirm-pending');
+            return;
+        }
+
+        const button = getDisconnectButton(event.target);
+        if (!button) return;
+
+        if (button.dataset.autonektomeDisconnectBypass === 'true') {
+            delete button.dataset.autonektomeDisconnectBypass;
+            return;
+        }
+
+        const delay = getDisconnectProtectionDelay(now);
+        if (settings.disconnectProtection && delay > 0) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            queuedDisconnect = null;
+            clearDisconnectIntent();
+            const remaining = Math.max(1, Math.ceil(delay / 1000));
+            showRuntimeToast(`Быстрый скип: подождите ${remaining} с`, Math.min(5000, delay + 500));
+            diag('warn', 'disconnect.manualBlockedUntilFiveSeconds', {
+                delay,
+                conversationAge: getCurrentConversationAgeMs(now),
+                fastDisconnectsInWindow: disconnectHistory.length
+            });
+            return;
+        }
+
+        // Само открытие окна ничего не записывает. Намерение живёт лишь до
+        // подтверждения и безопасно исчезает после отмены/таймаута.
+        markDisconnectIntent('one-click');
+        if (settings.autoConfirmDisconnect) {
+            beginAutoConfirmWindow('one-click', false);
+        }
+    }
+
     function checkAndClickButton(reason = 'manual') {
         if (!isAutoModeEnabled) {
+            endSeamlessTransition();
             diag('debug', 'autoClick.skip.disabled', { reason }, { throttleMs: 1500 });
+            return;
+        }
+
+        if (isAutoSearchSafetyPaused()) {
+            endSeamlessTransition();
+            diag('debug', 'autoClick.skip.safetyPause', { reason, pauseUntil: autoSearchPauseUntil }, { throttleMs: 1500 });
             return;
         }
 
         const finishedScreen = getFinishedSearchContainer();
         if (!finishedScreen) {
+            if (seamlessTransitionUntil && (/#\/searching(?:$|[/?])/i.test(location.hash || '') || /#\/peer(?:$|[/?])/i.test(location.hash || ''))) {
+                endSeamlessTransition();
+            }
             // Важно: на стартовом экране idle не нажимаем #searchCompanyBtn автоматически.
             // Авторежим здесь только готовится; автопоиск срабатывает уже между диалогами.
             const idleStartButton = document.querySelector('.chat-step.idle button#searchCompanyBtn, button#searchCompanyBtn');
@@ -1827,30 +1829,13 @@
     }
 
     function skipConversation() {
-        let stopButton = document.querySelector('button.callScreen__cancelCallBtn.btn.danger2.cancelCallBtnNoMess');
-
-        if (!stopButton) {
-            stopButton = document.querySelector('button.btn.btn-lg.stop-talk-button');
-        }
-
-        if (stopButton) {
-            stopButton.click();
-
-            setTimeout(() => {
-                const confirmButton = document.querySelector('button.swal2-confirm.swal2-styled');
-                if (confirmButton) {
-                    confirmButton.click();
-                    playNotificationOnEnd();
-                } else {
-                    playNotificationOnEnd();
-                }
-            }, 500);
-        }
+        const stopButton = getDisconnectButton(document);
+        if (stopButton) queueProtectedDisconnect(stopButton, 'automatic-skip');
     }
 
     function playNotificationOnEnd() {
         if (isConversationActive) {
-            endConversationAudio.play().catch(e => {});
+            if (settings.notificationSounds) endConversationAudio.play().catch(e => {});
             isConversationActive = false;
             updateCurrentStatusUI();
         }
@@ -1858,8 +1843,10 @@
 
     function playNotificationOnStart() {
         if (!isConversationActive) {
-            startConversationAudio.dataset.custom = 'true';
-            startConversationAudio.play().catch(e => {});
+            if (settings.notificationSounds) {
+                startConversationAudio.dataset.custom = 'true';
+                startConversationAudio.play().catch(e => {});
+            }
             isConversationActive = true;
             updateCurrentStatusUI('talking');
         }
@@ -1876,6 +1863,10 @@
 
     function toggleAutoMode(enable) {
         isAutoModeEnabled = !!enable;
+        if (!isAutoModeEnabled) {
+            if (queuedDisconnect?.source === 'automatic-skip') queuedDisconnect = null;
+            endSeamlessTransition();
+        }
         const toggleInput = document.querySelector('#auto-mode-input');
         const toggleLabel = document.querySelector('#auto-mode-label');
         const switchLabel = document.querySelector('#auto-mode-switch');
@@ -1907,12 +1898,14 @@
         return getter(normalizeMediaConstraints(constraints));
     }
 
-    async function getMicStream() {
+    async function getMicStream(options = {}) {
         try {
             micStream = await requestRawMicStream({ audio: true });
             globalStream = micStream;
             syncMicMuteState();
-            if (settings.enableLoopback) enableSelfListening(globalStream);
+            if (settings.enableLoopback && !options.skipLoopback) {
+                await enableSelfListening(globalStream);
+            }
             return micStream;
         } catch (e) {
             console.error('Ошибка получения микрофона:', e);
@@ -1920,113 +1913,188 @@
         }
     }
 
+    function hasLiveAudioTrack(stream) {
+        return !!stream?.getAudioTracks?.().some(track => track.readyState !== 'ended');
+    }
+
+    function unlockAudioContext(context, reason = 'unknown') {
+        if (!context || context.state === 'closed') return Promise.resolve(false);
+
+        // Создаём короткий бесшумный источник прямо во время пользовательского клика.
+        // Это сохраняет право браузера на воспроизведение, даже если затем нужно
+        // дождаться асинхронного разрешения getUserMedia.
+        try {
+            const buffer = context.createBuffer(1, 1, context.sampleRate || 44100);
+            const source = context.createBufferSource();
+            source.buffer = buffer;
+            source.connect(context.destination);
+            source.start(0);
+            source.addEventListener?.('ended', () => {
+                try { source.disconnect(); } catch (error) {}
+            }, { once: true });
+        } catch (error) {}
+
+        if (context.state !== 'suspended') return Promise.resolve(context.state === 'running');
+        return context.resume()
+            .then(() => context.state === 'running')
+            .catch(error => {
+                diag('warn', 'selfListening.context.resumeFailed', {
+                    reason,
+                    state: context.state,
+                    message: error?.message || String(error)
+                });
+                return false;
+            });
+    }
+
+    function createSelfListeningAudioContext(preferredStream = null) {
+        if (!AudioContextClass) return null;
+        const sampleRate = Number(preferredStream?.getAudioTracks?.()[0]?.getSettings?.().sampleRate);
+        const options = { latencyHint: 'interactive' };
+        if (Number.isFinite(sampleRate) && sampleRate >= 8000) options.sampleRate = sampleRate;
+        try {
+            return new AudioContextClass(options);
+        } catch (error) {
+            try { return new AudioContextClass({ latencyHint: 'interactive' }); } catch (fallbackError) {}
+            return new AudioContextClass();
+        }
+    }
+
+    function prepareSelfListeningContext(preferredStream = null) {
+        if (!AudioContextClass) return null;
+        if (!audioContext || audioContext.state === 'closed') {
+            audioContext = createSelfListeningAudioContext(preferredStream);
+        }
+        void unlockAudioContext(audioContext, 'user-gesture');
+        return audioContext;
+    }
+
+    async function requestSelfListeningStream(preferredStream = null) {
+        const getter = nativeGetUserMedia || navigator.mediaDevices?.getUserMedia?.bind(navigator.mediaDevices);
+        if (!getter) throw new Error('navigator.mediaDevices.getUserMedia недоступен');
+
+        const preferredTrack = preferredStream?.getAudioTracks?.()[0] || null;
+        const deviceId = preferredTrack?.getSettings?.().deviceId || '';
+        const directMonitorConstraints = {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            channelCount: { ideal: 1 },
+            latency: { ideal: 0.01 }
+        };
+        if (deviceId) directMonitorConstraints.deviceId = { exact: deviceId };
+
+        try {
+            return await getter({ audio: directMonitorConstraints });
+        } catch (error) {
+            if (!deviceId) throw error;
+            delete directMonitorConstraints.deviceId;
+            return getter({ audio: directMonitorConstraints });
+        }
+    }
+
+    async function waitForSelfListeningTrack(stream, timeoutMs = 650) {
+        const track = stream?.getAudioTracks?.()[0];
+        if (!track || track.readyState === 'ended') return false;
+
+        if (track.muted) {
+            await Promise.race([
+                new Promise(resolve => track.addEventListener?.('unmute', resolve, { once: true })),
+                new Promise(resolve => setTimeout(resolve, timeoutMs))
+            ]);
+        }
+
+        // Короткий прогрев предотвращает прерывистый первый запуск некоторых
+        // микрофонных драйверов, когда поток уже live, но ещё отдаёт рваные буферы.
+        await new Promise(resolve => setTimeout(resolve, 180));
+        return track.readyState !== 'ended';
+    }
+
+    function disconnectSelfListeningGraph() {
+        try { selfListeningSource?.disconnect(); } catch (error) {}
+        try { gainNode?.disconnect(); } catch (error) {}
+        selfListeningSource = null;
+        gainNode = null;
+    }
+
     function stopSelfListening() {
+        selfListeningRequestId++;
+        disconnectSelfListeningGraph();
+        if (selfListeningStream) {
+            selfListeningStream.getTracks?.().forEach(track => track.stop());
+            selfListeningStream = null;
+        }
         if (audioContext) {
             audioContext.close().catch(() => {});
             audioContext = null;
         }
-        gainNode = null;
-        pitchNode = null;
     }
 
-    function enableSelfListening(stream) {
-        if (!stream || !stream.getAudioTracks().length || !AudioContextClass) return;
+    async function enableSelfListening(preferredStream = null, preparedContext = null) {
+        if (!AudioContextClass) return false;
 
-        stopSelfListening();
+        const requestId = ++selfListeningRequestId;
+        let context = preparedContext;
+        if (!context || context.state === 'closed') context = prepareSelfListeningContext(preferredStream);
+        if (!context) return false;
 
-        audioContext = new AudioContextClass();
-        const source = audioContext.createMediaStreamSource(stream);
-        gainNode = audioContext.createGain();
-        gainNode.gain.value = settings.gainValue;
-
-        // Как во втором рабочем скрипте: mic -> gain -> speakers.
-        // Дополнительный lowshelf оставлен только для локального мониторинга низкого голоса.
-        if (settings.voicePitch && settings.pitchLevel > 0) {
-            pitchNode = audioContext.createBiquadFilter();
-            pitchNode.type = 'lowshelf';
-            pitchNode.frequency.value = 300;
-            pitchNode.gain.value = 10;
-            source.connect(pitchNode);
-            pitchNode.connect(gainNode);
-        } else {
-            source.connect(gainNode);
+        if (audioContext && audioContext !== context) {
+            try { await audioContext.close(); } catch (error) {}
+        }
+        audioContext = context;
+        disconnectSelfListeningGraph();
+        if (selfListeningStream) {
+            selfListeningStream.getTracks?.().forEach(track => track.stop());
+            selfListeningStream = null;
         }
 
-        gainNode.connect(audioContext.destination);
-        if (audioContext.state === 'suspended') audioContext.resume().catch(() => {});
-    }
+        await unlockAudioContext(context, 'connect-microphone');
+        if (requestId !== selfListeningRequestId || !settings.enableLoopback || context.state === 'closed') return false;
 
-    async function createPitchShiftedStream(stream) {
-        if (!stream || !stream.getAudioTracks().length) return stream;
-
-        // Важный фикс: без включённого изменения голоса возвращаем оригинальный поток.
-        // Раньше скрипт всегда возвращал MediaStream из AudioContext, из-за чего nekto.me мог не получить нормальный mic stream.
-        if (!settings.voicePitch || settings.pitchLevel <= 0 || !AudioContextClass) {
-            return stream;
-        }
-
-        if (pitchAudioContext) pitchAudioContext.close().catch(() => {});
-        pitchAudioContext = new AudioContextClass();
-        pitchSource = pitchAudioContext.createMediaStreamSource(stream);
-        const outputNode = pitchAudioContext.createGain();
-
+        let stream = null;
         try {
-            if (!pitchAudioContext.audioWorklet) throw new Error('AudioWorklet не поддерживается');
+            stream = await requestSelfListeningStream(preferredStream);
+            __autoNektomeMediaSafety.registerStream(stream);
+            if (!await waitForSelfListeningTrack(stream)) throw new Error('Поток микрофона не готов');
 
-            const blob = new Blob([pitchShiftWorkletCode], { type: 'application/javascript' });
-            const url = URL.createObjectURL(blob);
-            await pitchAudioContext.audioWorklet.addModule(url);
-            URL.revokeObjectURL(url);
+            if (requestId !== selfListeningRequestId || !settings.enableLoopback || context.state === 'closed') {
+                stream.getTracks?.().forEach(track => track.stop());
+                return false;
+            }
 
-            pitchWorkletNode = new AudioWorkletNode(pitchAudioContext, 'pitch-shift-processor');
-            const pitchShiftFactor = 1.0 - settings.pitchLevel;
-            pitchWorkletNode.port.postMessage(pitchShiftFactor);
+            selfListeningSource = context.createMediaStreamSource(stream);
+            gainNode = context.createGain();
+            gainNode.gain.value = Math.max(0, Number(settings.gainValue) || 1);
 
-            pitchNode = pitchAudioContext.createBiquadFilter();
-            pitchNode.type = 'lowshelf';
-            pitchNode.frequency.value = 300;
-            pitchNode.gain.value = 10;
+            selfListeningSource.connect(gainNode);
+            gainNode.connect(context.destination);
+            const running = await unlockAudioContext(context, 'graph-connected');
+            if (requestId !== selfListeningRequestId || !settings.enableLoopback) {
+                disconnectSelfListeningGraph();
+                stream.getTracks?.().forEach(track => track.stop());
+                return false;
+            }
 
-            pitchSource.connect(pitchWorkletNode);
-            pitchWorkletNode.connect(pitchNode);
-            pitchNode.connect(outputNode);
+            selfListeningStream = stream;
+            syncMicMuteState();
+            diag('info', 'selfListening.started', {
+                contextState: context.state,
+                running,
+                gain: gainNode.gain.value,
+                trackState: stream.getAudioTracks?.()[0]?.readyState || null,
+                latencyHint: 'interactive'
+            });
+            return context.state === 'running';
         } catch (error) {
-            console.warn('AutoNektome: не удалось включить изменение голоса, использую обычный микрофон', error);
-            pitchSource.connect(outputNode);
+            stream?.getTracks?.().forEach(track => track.stop());
+            disconnectSelfListeningGraph();
+            diag('error', 'selfListening.startFailed', {
+                message: error?.message || String(error),
+                name: error?.name || null,
+                contextState: context.state
+            });
+            return false;
         }
-
-        const destination = pitchAudioContext.createMediaStreamDestination();
-        outputNode.connect(destination);
-        if (pitchAudioContext.state === 'suspended') pitchAudioContext.resume().catch(() => {});
-        return destination.stream;
-    }
-
-    async function buildOutgoingMicStream(rawStream) {
-        micStream = rawStream;
-        const outgoingStream = await createPitchShiftedStream(rawStream);
-        globalStream = outgoingStream || rawStream;
-        syncMicMuteState();
-        if (settings.enableLoopback) enableSelfListening(globalStream);
-        return globalStream;
-    }
-
-    function updatePitchEffect(enable) {
-        settings.voicePitch = enable;
-        saveSetting('voicePitch', enable);
-
-        // Изменение уже переданного сайту MediaStream невозможно надёжно заменить без нового getUserMedia.
-        // Поэтому обновляем только самопрослушивание; для отправки изменённого голоса нужен новый поиск/перезагрузка страницы.
-        if (settings.enableLoopback && globalStream) enableSelfListening(globalStream);
-    }
-
-    function updatePitchLevel(value) {
-        settings.pitchLevel = value;
-        saveSetting('pitchLevel', value);
-        if (pitchWorkletNode) {
-            const pitchShiftFactor = 1.0 - settings.pitchLevel;
-            pitchWorkletNode.port.postMessage(pitchShiftFactor);
-        }
-        if (settings.enableLoopback && globalStream) enableSelfListening(globalStream);
     }
 
     // ### Улучшенная автогромкость
@@ -2107,7 +2175,7 @@
 
             const avgVolume = volumeHistory.reduce((a, b) => a + b, 0) / volumeHistory.length;
 
-            const volumeSlider = document.querySelector('.volume_slider input.slider-input');
+            const volumeSlider = document.querySelector('.volume_slider input.slider-input, #an-site-volume-slider');
             if (!volumeSlider) {
                 diag('debug', 'autoVolume.noSlider', null, { throttleMs: 3000 });
                 return;
@@ -2185,6 +2253,8 @@
 
     // ### Голосовое управление
     async function initSpeechRecognition() {
+    if (!settings.voiceControl) return;
+
         if (!('webkitSpeechRecognition' in window)) {
             console.error('Speech Recognition API не поддерживается.');
             return;
@@ -2245,7 +2315,7 @@
             if (isNetworkBlocked) return;
 
             // Перезапуск только если голосовое управление все еще включено
-            if (isVoiceControlEnabled) {
+            if (isVoiceControlEnabled && settings.voiceControl) {
                 setTimeout(() => {
                     startRecognitionSafe();
                 }, 1000);
@@ -2261,6 +2331,7 @@
 
     // Безопасный старт с проверкой флага
     function startRecognitionSafe() {
+        if (!isVoiceControlEnabled || !settings.voiceControl || !recognition) return;
         if (isRecognitionActive) {
             console.log("Recognition already active, skip start.");
             return;
@@ -2293,34 +2364,268 @@
         updateStatsUI();
     }
 
-    function startConversationTimer() {
-        if (conversationTimer) clearInterval(conversationTimer);
-        currentConversationStart = Date.now();
-        playNotificationOnStart();
+    function parseDisplayedDuration(text) {
+        const parts = String(text || '').trim().match(/\d+/g)?.map(Number) || [];
+        if (!parts.length || parts.some(value => !Number.isFinite(value))) return 0;
+        if (parts.length >= 3) return parts.slice(-3).reduce((total, value, index) => total + value * [3600, 60, 1][index], 0);
+        if (parts.length === 2) return parts[0] * 60 + parts[1];
+        return parts[0];
+    }
 
+    function getConversationSnapshot() {
+        const finishedScreen = getFinishedSearchContainer();
+        const timerElement = document.querySelector('.callScreen__time, .timer-label');
+        const talkStopButton = document.querySelector('button.callScreen__cancelCallBtn.btn.danger2.cancelCallBtnNoMess, button.btn.btn-lg.stop-talk-button, button.stop-talk-button');
+        const audio = document.querySelector('audio#audioStream');
+        const remoteStream = audio?.srcObject || null;
+        const remoteTracks = remoteStream?.getAudioTracks?.() || [];
+        const activeRemoteTrack = remoteTracks.some(track => track.readyState === 'live' && track.enabled !== false);
+        const remoteTrackIds = remoteTracks.map(track => String(track.id || '')).filter(Boolean).sort().join(',');
+        const remoteStreamId = String(remoteStream?.id || '');
+        const connectionIdentity = [remoteStreamId, remoteTrackIds].filter(Boolean).join('|');
+        const peerRoute = /#\/peer(?:$|[/?])/i.test(location.hash || '');
+        const searchingRoute = /#\/searching(?:$|[/?])/i.test(location.hash || '');
+        const idleButton = document.querySelector('.chat-step.idle button#searchCompanyBtn, button#searchCompanyBtn');
+        const siteTimerSeconds = timerElement ? parseDisplayedDuration(timerElement.textContent) : 0;
+        const connected = !finishedScreen && !searchingRoute && (
+            (!!timerElement && (peerRoute || !!talkStopButton || activeRemoteTrack)) ||
+            (peerRoute && activeRemoteTrack)
+        );
+        const ended = !!finishedScreen || searchingRoute || (!peerRoute && !!idleButton && !timerElement);
+        return {
+            connected,
+            ended,
+            timerElement,
+            siteTimerSeconds,
+            talkStopButton,
+            activeRemoteTrack,
+            connectionIdentity,
+            peerRoute,
+            searchingRoute
+        };
+    }
+
+    function startConversationTimer(startedAt = Date.now(), reason = 'signal', connectionIdentity = '') {
+        if (currentConversationStart) return;
+        currentConversationStart = Math.max(0, Number(startedAt) || Date.now());
+        activeConversationIdentity = String(connectionIdentity || '');
+        lastConversationSignalAt = Date.now();
+        playNotificationOnStart();
+        if (conversationTimer) clearInterval(conversationTimer);
         conversationTimer = setInterval(() => {
             updateStatsUI();
             updateCurrentStatusUI();
-            const timerElement = document.querySelector('.callScreen__time, .timer-label');
-            if (!timerElement || timerElement.textContent === '00:00') {
-                stopConversationTimer();
-            }
         }, 1000);
+        diag('info', 'conversation.started', {
+            reason,
+            startedAt: currentConversationStart,
+            connectionIdentity: activeConversationIdentity || null
+        });
+        updateStatsUI();
     }
 
-    function stopConversationTimer() {
-        if (conversationTimer && currentConversationStart) {
-            clearInterval(conversationTimer);
-            const duration = Math.floor((Date.now() - currentConversationStart) / 1000);
-            updateConversationStats(duration);
-            settings.totalConversationDuration = Math.max(0, (Number(settings.totalConversationDuration) || 0) + duration);
-            saveSetting('totalConversationDuration', settings.totalConversationDuration);
-            playNotificationOnEnd();
-            conversationTimer = null;
-            currentConversationStart = null;
-            updateStatsUI();
-            updateCurrentStatusUI();
+    function stopConversationTimer(endedAt = Date.now(), reason = 'signal', durationOverrideSeconds = null) {
+        if (!currentConversationStart) return;
+        if (conversationTimer) clearInterval(conversationTimer);
+        const safeEnd = Math.max(currentConversationStart, Number(endedAt) || Date.now());
+        const measuredDuration = Math.max(0, Math.floor((safeEnd - currentConversationStart) / 1000));
+        const overrideDuration = Number(durationOverrideSeconds);
+        const hasDurationOverride = durationOverrideSeconds !== null &&
+            typeof durationOverrideSeconds !== 'undefined' &&
+            Number.isFinite(overrideDuration);
+        const duration = hasDurationOverride
+            ? Math.max(0, Math.floor(overrideDuration))
+            : measuredDuration;
+        updateConversationStats(duration);
+        settings.totalConversationDuration = Math.max(0, (Number(settings.totalConversationDuration) || 0) + duration);
+        saveSetting('totalConversationDuration', settings.totalConversationDuration);
+        diag('info', 'conversation.stopped', {
+            reason,
+            duration,
+            measuredDuration,
+            durationOverridden: hasDurationOverride,
+            connectionIdentity: activeConversationIdentity || null
+        });
+        conversationTimer = null;
+        currentConversationStart = null;
+        activeConversationIdentity = '';
+        conversationStartCandidateAt = 0;
+        conversationEndCandidateAt = 0;
+        lastConversationSignalAt = 0;
+        lastObservedSiteTimerSeconds = 0;
+        playNotificationOnEnd();
+        updateStatsUI();
+        updateCurrentStatusUI();
+    }
+
+    function getBestCompletedConversationDuration(now = Date.now()) {
+        if (lastObservedSiteTimerSeconds > 0) return lastObservedSiteTimerSeconds;
+        if (!currentConversationStart) return 0;
+        return Math.max(0, Math.floor((now - currentConversationStart) / 1000));
+    }
+
+    function syncConversationLifecycle(reason = 'maintenance') {
+        const now = Date.now();
+        const snapshot = getConversationSnapshot();
+
+        if (snapshot.connected) {
+            const identityChanged = !!(
+                currentConversationStart &&
+                activeConversationIdentity &&
+                snapshot.connectionIdentity &&
+                activeConversationIdentity !== snapshot.connectionIdentity
+            );
+            const timerRolledBack = !!(
+                currentConversationStart &&
+                lastObservedSiteTimerSeconds >= 2 &&
+                snapshot.siteTimerSeconds <= 1 &&
+                snapshot.siteTimerSeconds < lastObservedSiteTimerSeconds
+            );
+
+            // При очень быстром переходе Nekto.me может заменить собеседника без
+            // заметного промежуточного экрана. Новый MediaStream/трек или сброс
+            // штатного таймера означает, что предыдущий разговор нужно закрыть
+            // и сразу начать новый, иначе оба диалога склеиваются в один.
+            if (identityChanged || timerRolledBack) {
+                const completedDuration = getBestCompletedConversationDuration(now);
+                stopConversationTimer(now, `rollover:${reason}`, completedDuration);
+            }
+
+            lastConversationSignalAt = now;
+            conversationEndCandidateAt = 0;
+            conversationStartCandidateAt = 0;
+
+            if (!currentConversationStart) {
+                const siteBasedStart = now - Math.max(0, snapshot.siteTimerSeconds) * 1000;
+                startConversationTimer(siteBasedStart, reason, snapshot.connectionIdentity);
+            } else {
+                if (!activeConversationIdentity && snapshot.connectionIdentity) {
+                    activeConversationIdentity = snapshot.connectionIdentity;
+                }
+
+                // Штатный таймер Nekto.me является источником истины. Если
+                // локальная точка старта ушла вперёд/назад из-за фоновой вкладки
+                // или пропущенного DOM-перехода, мягко синхронизируем её.
+                const localDuration = Math.max(0, Math.floor((now - currentConversationStart) / 1000));
+                if (snapshot.timerElement && Math.abs(localDuration - snapshot.siteTimerSeconds) >= 2) {
+                    currentConversationStart = now - Math.max(0, snapshot.siteTimerSeconds) * 1000;
+                }
+            }
+
+            lastObservedSiteTimerSeconds = Math.max(0, snapshot.siteTimerSeconds);
+            return snapshot;
         }
+
+        conversationStartCandidateAt = 0;
+        if (snapshot.timerElement) {
+            lastObservedSiteTimerSeconds = Math.max(lastObservedSiteTimerSeconds, snapshot.siteTimerSeconds);
+        }
+        if (currentConversationStart) {
+            if (snapshot.ended) {
+                // Явный экран завершения/поиска фиксируем сразу. Это особенно
+                // важно для быстрых скипов: ожидание grace-периода позволяло
+                // следующему диалогу начаться раньше, чем учитывался предыдущий.
+                stopConversationTimer(now, `explicit-end:${reason}`, getBestCompletedConversationDuration(now));
+            } else {
+                const signalExpired = lastConversationSignalAt && now - lastConversationSignalAt >= CONVERSATION_SIGNAL_LOSS_GRACE_MS;
+                if (signalExpired) {
+                    if (!conversationEndCandidateAt) conversationEndCandidateAt = now;
+                    if (now - conversationEndCandidateAt >= CONVERSATION_END_GRACE_MS) {
+                        stopConversationTimer(conversationEndCandidateAt, `signal-loss:${reason}`, getBestCompletedConversationDuration(conversationEndCandidateAt));
+                    }
+                } else {
+                    conversationEndCandidateAt = 0;
+                }
+            }
+        }
+        return snapshot;
+    }
+
+    function getNativeVolumeSlider() {
+        return document.querySelector('.volume_slider input.slider-input, .volume_slider input[type="range"]');
+    }
+
+    function clearScriptHiddenState(element) {
+        if (!element) return;
+        element.classList.remove('autonektome-hide-site-chrome');
+        delete element.dataset.autonektomeHiddenSiteChrome;
+        ['display', 'visibility', 'opacity', 'width', 'height', 'max-width', 'max-height', 'margin', 'padding', 'overflow', 'pointer-events'].forEach(prop => clearImportantStyle(element, prop));
+    }
+
+    function restoreNativeVolumeControl() {
+        const slider = getNativeVolumeSlider();
+        if (!slider) return null;
+        const wrapper = slider.closest('.volume_slider');
+        const header = slider.closest('.header.header_chat, .header_chat');
+        clearScriptHiddenState(header);
+        clearScriptHiddenState(wrapper);
+        forceImportantStyle(header, 'display', 'flex');
+        forceImportantStyle(header, 'visibility', 'visible');
+        forceImportantStyle(header, 'opacity', '1');
+        forceImportantStyle(wrapper, 'display', 'flex');
+        forceImportantStyle(wrapper, 'visibility', 'visible');
+        forceImportantStyle(wrapper, 'opacity', '1');
+        return slider;
+    }
+
+    function getSiteVolumePercent() {
+        const value = Number(settings.siteVolume);
+        return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 50;
+    }
+
+    function applySiteVolume(value, source = 'fallback') {
+        const rawValue = Number(value);
+        const normalized = Number.isFinite(rawValue) ? Math.max(0, Math.min(100, rawValue)) : getSiteVolumePercent();
+        settings.siteVolume = normalized;
+        saveSetting('siteVolume', normalized);
+        const audio = document.querySelector('audio#audioStream');
+        if (audio) audio.volume = normalized / 100;
+        const nativeSlider = restoreNativeVolumeControl();
+        if (nativeSlider && source !== 'native') {
+            nativeSlider.value = String(normalized);
+            nativeSlider.dispatchEvent(new Event('input', { bubbles: true }));
+            nativeSlider.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        const fallbackSlider = document.querySelector('#an-site-volume-slider');
+        const fallbackValue = document.querySelector('#an-site-volume-value');
+        const miniSlider = document.querySelector('#an-mini-volume-slider');
+        const miniValue = document.querySelector('#an-mini-volume-value');
+        if (fallbackSlider && source !== 'fallback') fallbackSlider.value = String(normalized);
+        if (miniSlider && source !== 'mini') miniSlider.value = String(normalized);
+        if (fallbackValue) fallbackValue.textContent = `${Math.round(normalized)}%`;
+        if (miniValue) miniValue.textContent = `${Math.round(normalized)}%`;
+    }
+
+    function syncVolumeControls() {
+        const nativeSlider = restoreNativeVolumeControl();
+        const fallback = document.querySelector('#an-site-volume-fallback');
+        if (fallback) fallback.hidden = false;
+        if (nativeSlider) {
+            if (!nativeSlider.dataset.autonektomeVolumeListener) {
+                nativeSlider.addEventListener('input', () => applySiteVolume(nativeSlider.value, 'native'));
+                nativeSlider.dataset.autonektomeVolumeListener = 'true';
+            }
+            const value = Number(nativeSlider.value);
+            if (Number.isFinite(value)) {
+                settings.siteVolume = value;
+                const fallbackSlider = document.querySelector('#an-site-volume-slider');
+                const fallbackValue = document.querySelector('#an-site-volume-value');
+                const miniSlider = document.querySelector('#an-mini-volume-slider');
+                const miniValue = document.querySelector('#an-mini-volume-value');
+                if (fallbackSlider) fallbackSlider.value = String(value);
+                if (miniSlider) miniSlider.value = String(value);
+                if (fallbackValue) fallbackValue.textContent = `${Math.round(value)}%`;
+                if (miniValue) miniValue.textContent = `${Math.round(value)}%`;
+            }
+            return true;
+        }
+        if (fallback) fallback.hidden = false;
+        const audio = document.querySelector('audio#audioStream');
+        if (audio && !audio.dataset.autonektomeInitialVolumeApplied) {
+            audio.volume = Math.max(0, Math.min(1, getSiteVolumePercent() / 100));
+            audio.dataset.autonektomeInitialVolumeApplied = 'true';
+        }
+        return false;
     }
 
     // ### Функции для управления микрофоном и наушниками
@@ -2346,7 +2651,7 @@
         const micButtons = document.querySelectorAll('.an-mic-toggle-button, #mic-toggle');
         const headphoneButtons = document.querySelectorAll('.an-headphone-toggle-button, #headphone-toggle');
 
-        const micState = globalStream && globalStream.getAudioTracks().length > 0 ? !globalStream.getAudioTracks()[0].enabled : isMicMuted;
+        const micState = __autoNektomeMediaSafety.isMuted();
         isMicMuted = micState;
         micButtons.forEach(micButton => {
             micButton.classList.toggle('is-muted', isMicMuted);
@@ -3026,14 +3331,49 @@
                 font-size: 18px;
             }
 
-            .an-setting-row[data-setting="adBlock"] {
-                border-color: color-mix(in srgb, var(--an-primary) 42%, var(--an-outline-variant));
-                background: linear-gradient(135deg, color-mix(in srgb, var(--an-primary-container) 60%, var(--an-surface-container)), var(--an-surface-container));
+            #settings-container button {
+                font: inherit;
+                color: inherit;
+                -webkit-appearance: none;
+                appearance: none;
             }
 
-            .an-setting-row[data-setting="adBlock"] .an-setting-title::before {
-                content: "🛡️ ";
+            .an-soft-button {
+                min-height: 34px;
+                padding: 6px 12px;
+                border: 1px solid color-mix(in srgb, var(--an-primary) 28%, var(--an-outline-variant));
+                border-radius: 11px;
+                background: color-mix(in srgb, var(--an-primary) 10%, var(--an-surface-container-high));
+                color: var(--an-on-surface);
+                box-shadow: none;
+                font-size: 12px;
+                font-weight: 700;
+                line-height: 1.2;
+                white-space: nowrap;
+                cursor: pointer;
+                transition: background 160ms ease, border-color 160ms ease, color 160ms ease, transform 120ms ease, opacity 160ms ease;
             }
+
+            .an-soft-button:hover:not(:disabled) {
+                background: color-mix(in srgb, var(--an-primary) 18%, var(--an-surface-container-high));
+                border-color: color-mix(in srgb, var(--an-primary) 55%, var(--an-outline-variant));
+                color: var(--an-primary);
+            }
+
+            .an-soft-button:active:not(:disabled) {
+                transform: translateY(1px);
+            }
+
+            .an-soft-button:disabled {
+                opacity: .48;
+                cursor: not-allowed;
+                background: var(--an-surface-container-high);
+                border-color: var(--an-outline-variant);
+                color: var(--an-on-surface-variant);
+                filter: none;
+            }
+
+
 
 
             /* Compact visual pass v5.0 */
@@ -3379,14 +3719,7 @@
                 font-size: 15px;
             }
 
-            .an-setting-row[data-setting="adBlock"] {
-                border-color: var(--an-outline-variant);
-                background: var(--an-surface-container);
-            }
 
-            .an-setting-row[data-setting="adBlock"] .an-setting-title::before {
-                content: "🛡️ ";
-            }
 
             @container (max-width: 340px) {
                 .an-sticky-core {
@@ -3554,72 +3887,17 @@
                 transform: translateX(18px);
             }
 
-            .an-setting-row[data-setting="adBlock"] {
-                order: 999;
-                border-color: var(--an-outline-variant) !important;
-                background: var(--an-surface-container) !important;
-            }
 
-            .an-setting-row[data-setting="adBlock"] .an-setting-title::before,
-            .an-nested-option[data-setting^="adBlock"] .an-setting-title::before,
-            .an-nested-option[data-setting^="metric"] .an-setting-title::before {
-                content: "" !important;
-            }
 
-            .an-setting-row[data-setting="adBlock"] .an-setting-title {
-                font-size: 12.5px;
-                font-weight: 600;
-            }
 
-            .an-setting-row[data-setting="adBlock"] .an-setting-helper {
-                font-size: 10.5px;
-            }
 
-            .an-ad-details-toggle {
-                margin-top: 6px;
-                width: fit-content;
-                min-height: 26px;
-                padding: 0 10px;
-                border: 1px solid var(--an-outline-variant);
-                border-radius: 999px;
-                background: transparent;
-                color: var(--an-on-surface-variant);
-                font-size: 11px;
-                font-weight: 600;
-                cursor: pointer;
-            }
 
-            .an-ad-details-toggle:hover {
-                background: color-mix(in srgb, var(--an-primary) 10%, transparent);
-                color: var(--an-on-surface);
-            }
 
-            .an-ad-details-toggle:disabled {
-                opacity: 0.45;
-                cursor: default;
-            }
 
-            .an-setting-row[data-setting="adBlock"] .an-nested {
-                margin-top: 6px;
-                padding: 6px;
-            }
 
-            .an-setting-row[data-setting="adBlock"] .an-nested-options {
-                gap: 5px;
-            }
 
-            .an-setting-row[data-setting="adBlock"] .an-nested-option {
-                padding: 6px 7px;
-                border-radius: 10px;
-            }
 
-            .an-setting-row[data-setting="adBlock"] .an-nested-option .an-setting-title {
-                font-size: 11.5px;
-            }
 
-            .an-setting-row[data-setting="adBlock"] .an-nested-option .an-setting-helper {
-                font-size: 10px;
-            }
 
             @container (max-width: 460px) {
                 .an-sticky-core {
@@ -3809,6 +4087,75 @@
                 text-overflow: ellipsis;
             }
 
+
+            .an-stat-value,
+            .an-mini-stat-value {
+                width: 100%;
+                max-width: 100%;
+                min-width: 0;
+                font-variant-numeric: tabular-nums;
+                letter-spacing: -0.02em;
+                text-overflow: clip;
+            }
+
+            #an-site-volume-fallback { grid-column: 1 / -1; }
+            #an-site-volume-fallback[hidden] { display: none !important; }
+            #an-site-volume-fallback .an-range-label { display: flex; justify-content: space-between; gap: 8px; }
+
+            body.autonektome-site-themed .header.header_chat,
+            body.autonektome-site-themed .volume_slider,
+            body.autonektome-site-themed .volume_slider * {
+                visibility: visible !important;
+                opacity: 1 !important;
+                pointer-events: auto !important;
+                max-width: none !important;
+                max-height: none !important;
+            }
+
+            body.autonektome-site-themed .header.header_chat {
+                display: flex !important;
+            }
+
+            body.autonektome-site-themed .volume_slider {
+                display: flex !important;
+            }
+
+            body.autonektome-auto-confirm-pending .swal2-container,
+            body.autonektome-auto-confirm-pending .swal2-backdrop-show {
+                opacity: 0 !important;
+                pointer-events: none !important;
+                transition: none !important;
+                animation: none !important;
+            }
+
+            body.autonektome-seamless-transition .callScreen.callFinished,
+            body.autonektome-seamless-transition .chat-step.finished,
+            body.autonektome-seamless-transition .chat-step.finish,
+            body.autonektome-seamless-transition .chat-step.hangup,
+            body.autonektome-seamless-transition .callFinished,
+            body.autonektome-seamless-transition .hangup {
+                opacity: 0 !important;
+                transition: none !important;
+                animation: none !important;
+            }
+
+            .autonektome-runtime-toast {
+                position: fixed;
+                left: 50%;
+                bottom: 22px;
+                transform: translateX(-50%);
+                z-index: 2147483647;
+                max-width: min(92vw, 430px);
+                padding: 10px 14px;
+                border-radius: 14px;
+                background: rgba(20, 18, 24, .94);
+                color: #fff;
+                box-shadow: 0 8px 28px rgba(0,0,0,.35);
+                font: 600 13px/1.35 "Segoe UI", Arial, sans-serif;
+                text-align: center;
+                pointer-events: none;
+            }
+
             .an-audio-actions {
                 grid-column: 1;
                 display: flex;
@@ -3849,23 +4196,11 @@
             .an-setting-title, .an-section-title { font-size: 13px; }
             .an-setting-helper, .an-section-helper { font-size: 11px; }
             .an-switch { transform: scale(.88); transform-origin: right center; }
-            .an-soft-button, .an-primary-button, .an-ad-details-toggle {
-                min-height: 30px;
-                padding: 0 11px;
-                border-radius: 10px;
-                border: 1px solid color-mix(in srgb, var(--an-primary) 18%, var(--an-outline-variant));
-                background: color-mix(in srgb, var(--an-primary) 9%, var(--an-surface));
-                color: var(--an-on-surface);
-                font-size: 12px;
-                font-weight: 750;
-                cursor: pointer;
-            }
             .an-primary-button {
                 background: var(--an-primary);
                 color: var(--an-on-primary);
                 border-color: var(--an-primary);
             }
-            .an-soft-button:hover, .an-ad-details-toggle:hover { background: color-mix(in srgb, var(--an-primary) 14%, var(--an-surface)); }
             .an-primary-button:hover { filter: brightness(1.06); }
 
             .an-voice-extras {
@@ -4069,9 +4404,6 @@
             }
             .an-eq-bars span.is-hot { background: linear-gradient(180deg, #f85149, #d29922); }
 
-            .an-ad-details-toggle { margin-top: 8px; opacity: .82; }
-            [data-setting="adBlock"] .an-nested-option .an-setting-title::before,
-            [data-setting="adBlock"] .an-setting-title::before { content: none !important; }
 
             .an-resize-handle {
                 position: absolute;
@@ -4175,7 +4507,8 @@
                 grid-template-columns: 32px 32px minmax(0, 1fr);
                 grid-template-areas:
                     "mic hp auto"
-                    "stats stats stats";
+                    "stats stats stats"
+                    "volume volume volume";
                 align-items: center;
                 gap: 8px;
             }
@@ -4183,6 +4516,41 @@
             #mini-headphone-toggle { grid-area: hp; }
             #mini-auto-mode-card { grid-area: auto; }
             .an-mini-stats { grid-area: stats; }
+            .an-mini-volume {
+                grid-area: volume;
+                min-width: 0;
+                display: grid;
+                grid-template-columns: 1fr;
+                gap: 4px;
+                padding: 7px 9px 8px;
+                border-radius: 11px;
+                background: color-mix(in srgb, var(--an-primary) 7%, var(--an-surface-container));
+                border: 1px solid color-mix(in srgb, var(--an-primary) 12%, var(--an-outline-variant));
+                cursor: pointer;
+            }
+            .an-mini-volume-header {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 8px;
+                font-size: 9.5px;
+                line-height: 1;
+                font-weight: 750;
+                color: var(--an-on-surface-variant);
+            }
+            .an-mini-volume-header strong {
+                color: var(--an-primary);
+                font-size: 10px;
+                font-variant-numeric: tabular-nums;
+            }
+            .an-mini-volume-slider {
+                width: 100%;
+                min-width: 0;
+                height: 14px;
+                margin: 0;
+                padding: 0;
+                cursor: pointer;
+            }
             .an-mini-widget .an-fab-button {
                 width: 32px;
                 min-width: 32px;
@@ -4269,40 +4637,6 @@
                 }
             }
 
-
-            .an-advanced-section {
-                margin-top: 10px;
-                opacity: .72;
-                transition: opacity 160ms ease;
-            }
-            .an-advanced-section:hover,
-            .an-advanced-section.is-open { opacity: 1; }
-            .an-advanced-toggle {
-                width: 100%;
-                border: none;
-                background: transparent;
-                color: var(--an-on-surface-variant);
-                font-size: 12px;
-                font-weight: 650;
-                letter-spacing: .02em;
-                text-align: left;
-                cursor: pointer;
-                padding: 8px 4px;
-            }
-            .an-advanced-content {
-                display: flex;
-                flex-direction: column;
-                gap: 8px;
-                padding-top: 4px;
-            }
-            .an-advanced-content[hidden] { display: none !important; }
-            .an-advanced-section .an-setting-row {
-                border-radius: 14px;
-                padding: 10px 12px;
-                background: color-mix(in srgb, var(--an-surface-container) 58%, transparent);
-            }
-            .an-advanced-section .an-setting-title { font-size: 13px; }
-            .an-advanced-section .an-setting-helper { font-size: 11px; }
 
             .an-mic-tools {
                 display: grid;
@@ -4597,8 +4931,28 @@
     }
 
 
-    function getCurrentConversationDuration() {
-        return currentConversationStart ? Math.floor((Date.now() - currentConversationStart) / 1000) : 0;
+    function getCurrentConversationDuration(now = Date.now()) {
+        if (!currentConversationStart) return 0;
+
+        // Пока штатный таймер разговора присутствует, отображаем именно его:
+        // это исключает расхождение панели AutoNektome с Nekto.me после быстрых
+        // переключений, фонового throttling или краткого изменения DOM.
+        const timerElement = document.querySelector('.callScreen__time, .timer-label');
+        if (timerElement && /\d/.test(String(timerElement.textContent || ''))) {
+            return Math.max(0, parseDisplayedDuration(timerElement.textContent));
+        }
+
+        return Math.max(0, Math.floor((now - currentConversationStart) / 1000));
+    }
+
+    function getLiveTotalConversationDuration(now = Date.now()) {
+        const completedDuration = Math.max(0, Number(settings.totalConversationDuration) || 0);
+        return completedDuration + getCurrentConversationDuration(now);
+    }
+
+    function getLiveConversationCount() {
+        const completedCount = Math.max(0, Number(settings.conversationCount) || 0);
+        return completedCount + (currentConversationStart ? 1 : 0);
     }
 
     function updateStatsUI() {
@@ -4609,16 +4963,17 @@
         const miniCurrentEl = document.querySelector('#an-mini-stat-current');
         const miniTotalEl = document.querySelector('#an-mini-stat-total');
         const legacyCounter = document.querySelector('#conversation-counter .an-counter-value');
-        const countText = String(settings.conversationCount || 0);
-        const currentText = formatDuration(getCurrentConversationDuration());
-        const totalText = formatDuration(settings.totalConversationDuration || 0);
-        if (countEl) countEl.textContent = countText;
-        if (currentEl) currentEl.textContent = currentText;
-        if (totalEl) totalEl.textContent = totalText;
-        if (miniCountEl) miniCountEl.textContent = countText;
-        if (miniCurrentEl) miniCurrentEl.textContent = currentText;
-        if (miniTotalEl) miniTotalEl.textContent = totalText;
-        if (legacyCounter) legacyCounter.textContent = `Разговоров: ${settings.conversationCount || 0}`;
+        const now = Date.now();
+        const countText = String(getLiveConversationCount());
+        const currentText = formatCurrentDuration(getCurrentConversationDuration(now));
+        const totalText = formatTotalDuration(getLiveTotalConversationDuration(now));
+        setStatValue(countEl, countText);
+        setStatValue(currentEl, currentText);
+        setStatValue(totalEl, totalText);
+        setStatValue(miniCountEl, countText);
+        setStatValue(miniCurrentEl, currentText);
+        setStatValue(miniTotalEl, totalText);
+        if (legacyCounter) legacyCounter.textContent = `Разговоров: ${getLiveConversationCount()}`;
     }
 
     function resolveCurrentStatus() {
@@ -4633,6 +4988,10 @@
             return { key: 'searching', title: 'Поиск', text: '' };
         }
         if (finishedScreen) {
+            if (isAutoSearchSafetyPaused()) {
+                const secondsLeft = Math.max(1, Math.ceil((autoSearchPauseUntil - Date.now()) / 1000));
+                return { key: 'idle', title: 'Пауза', text: `защита ${secondsLeft} с` };
+            }
             return { key: 'idle', title: 'Готов', text: 'между диалогами' };
         }
         if (searchButton) {
@@ -4822,6 +5181,7 @@
             open() { document.body.appendChild(backdrop); },
             close() {
                 if (micTestState?.modalBackdrop === backdrop) stopMicTest('modal-close');
+                if (micTestMonitorState?.modalBackdrop === backdrop) stopMicTestMonitor('modal-close');
                 if (backdrop.classList.contains('an-mic-modal')) { setTimeout(() => { if (!document.querySelector('.an-mic-modal')) clearMicTestRecording(); }, 250); }
                 backdrop.remove();
             }
@@ -4908,11 +5268,39 @@
         monitorText.appendChild(monitorHelper);
         const monitorSwitch = createMaterialSwitch(null, false);
         monitorSwitch.input.setAttribute('aria-label', 'Слышать себя в проверке микрофона');
-        monitorSwitch.input.addEventListener('change', () => {
-            if (micTestState?.monitorGain) {
-                micTestState.monitorGain.gain.value = monitorSwitch.input.checked ? Math.min(Math.max(settings.gainValue || 1, 0.2), 1.4) : 0;
-            }
+        monitorSwitch.input.addEventListener('change', async () => {
             monitorSwitch.label.classList.toggle('is-enabled', monitorSwitch.input.checked);
+
+            if (!monitorSwitch.input.checked) {
+                if (micTestState?.monitorGain) micTestState.monitorGain.gain.value = 0;
+                stopMicTestMonitor('toggle-off');
+                return;
+            }
+
+            if (micTestState?.monitorGain) {
+                micTestState.monitorGain.gain.value = Math.max(0, Number(settings.gainValue) || 1);
+                void unlockAudioContext(micTestState.ctx, 'mic-test-monitor-toggle');
+                return;
+            }
+
+            const preparedMonitorContext = AudioContextClass ? new AudioContextClass() : null;
+            if (preparedMonitorContext) void unlockAudioContext(preparedMonitorContext, 'mic-test-monitor-user-gesture');
+
+            try {
+                const started = await startMicTestMonitor({
+                    monitorInput: monitorSwitch.input,
+                    modalBackdrop: document.querySelector('.an-mic-modal'),
+                    preparedAudioContext: preparedMonitorContext
+                });
+                if (!started && monitorSwitch.input.checked) throw new Error('Самопрослушивание не запустилось');
+            } catch (error) {
+                preparedMonitorContext?.close?.().catch(() => {});
+                if (!monitorSwitch.input.checked) return;
+                monitorSwitch.input.checked = false;
+                monitorSwitch.label.classList.remove('is-enabled');
+                levelText.textContent = 'Не удалось получить доступ к микрофону.';
+                diag('error', 'micTest.monitor.failed', { message: error?.message || String(error), name: error?.name || null });
+            }
         });
         monitor.appendChild(monitorText);
         monitor.appendChild(monitorSwitch.label);
@@ -4963,6 +5351,10 @@
         modal.open();
 
         start.addEventListener('click', async () => {
+            stopMicTestMonitor('recording-start');
+            const preparedMonitorContext = AudioContextClass ? new AudioContextClass() : null;
+            if (preparedMonitorContext) void unlockAudioContext(preparedMonitorContext, 'mic-test-user-gesture');
+
             try {
                 start.disabled = true;
                 stop.disabled = false;
@@ -4979,9 +5371,11 @@
                     playButton: play,
                     playbackAudio,
                     monitorInput: monitorSwitch.input,
-                    modalBackdrop: document.querySelector('.an-mic-modal')
+                    modalBackdrop: document.querySelector('.an-mic-modal'),
+                    preparedAudioContext: preparedMonitorContext
                 });
             } catch (error) {
+                preparedMonitorContext?.close?.().catch(() => {});
                 levelText.textContent = 'Не удалось получить доступ к микрофону.';
                 start.disabled = false;
                 stop.disabled = true;
@@ -5010,18 +5404,98 @@
         return candidates.find(type => MediaRecorder.isTypeSupported?.(type)) || '';
     }
 
+    function stopMicTestMonitor(reason = 'manual') {
+        micTestMonitorRequestId++;
+        if (!micTestMonitorState) return;
+        const state = micTestMonitorState;
+        micTestMonitorState = null;
+        try { state.source?.disconnect(); } catch (error) {}
+        try { state.monitorGain?.disconnect(); } catch (error) {}
+        state.stream?.getTracks?.().forEach(track => track.stop());
+        state.ctx?.close?.().catch(() => {});
+        diag('info', 'micTest.monitor.stopped', { reason });
+    }
+
+    async function startMicTestMonitor(ui) {
+        stopMicTestMonitor('restart');
+        if (!AudioContextClass) return false;
+
+        const requestId = ++micTestMonitorRequestId;
+        const ctx = ui.preparedAudioContext || new AudioContextClass();
+        await unlockAudioContext(ctx, 'mic-test-monitor-before-get-user-media');
+
+        let stream;
+        try {
+            stream = await requestRawMicStream({
+                audio: {
+                    echoCancellation: settings.echoCancellation,
+                    noiseSuppression: settings.noiseSuppression,
+                    autoGainControl: settings.autoGainControl
+                }
+            });
+        } catch (error) {
+            ctx.close().catch(() => {});
+            throw error;
+        }
+
+        if (requestId !== micTestMonitorRequestId || !ui.monitorInput?.checked || !ui.modalBackdrop?.isConnected) {
+            stream.getTracks().forEach(track => track.stop());
+            ctx.close().catch(() => {});
+            return false;
+        }
+
+        const source = ctx.createMediaStreamSource(stream);
+        const monitorGain = ctx.createGain();
+        monitorGain.gain.value = Math.max(0, Number(settings.gainValue) || 1);
+        source.connect(monitorGain);
+        monitorGain.connect(ctx.destination);
+        const running = await unlockAudioContext(ctx, 'mic-test-monitor-connected');
+
+        if (requestId !== micTestMonitorRequestId || !ui.monitorInput?.checked || !ui.modalBackdrop?.isConnected) {
+            try { source.disconnect(); } catch (error) {}
+            try { monitorGain.disconnect(); } catch (error) {}
+            stream.getTracks().forEach(track => track.stop());
+            ctx.close().catch(() => {});
+            return false;
+        }
+
+        micTestMonitorState = {
+            stream,
+            ctx,
+            source,
+            monitorGain,
+            modalBackdrop: ui.modalBackdrop
+        };
+        diag('info', 'micTest.monitor.started', {
+            contextState: ctx.state,
+            running,
+            gain: monitorGain.gain.value,
+            trackState: stream.getAudioTracks?.()[0]?.readyState || null
+        });
+        return ctx.state === 'running';
+    }
+
     async function startMicTest(ui) {
         stopMicTest('restart');
         clearMicTestRecording();
 
-        const stream = await requestRawMicStream({
-            audio: {
-                echoCancellation: settings.echoCancellation,
-                noiseSuppression: settings.noiseSuppression,
-                autoGainControl: settings.autoGainControl
-            }
-        });
-        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const ctx = ui.preparedAudioContext || new (window.AudioContext || window.webkitAudioContext)();
+        await unlockAudioContext(ctx, 'mic-test-before-get-user-media');
+
+        let stream;
+        try {
+            stream = await requestRawMicStream({
+                audio: {
+                    echoCancellation: settings.echoCancellation,
+                    noiseSuppression: settings.noiseSuppression,
+                    autoGainControl: settings.autoGainControl
+                }
+            });
+        } catch (error) {
+            ctx.close().catch(() => {});
+            throw error;
+        }
+
         const source = ctx.createMediaStreamSource(stream);
         const analyser = ctx.createAnalyser();
         analyser.fftSize = 2048;
@@ -5031,9 +5505,10 @@
         source.connect(analyser);
 
         const monitorGain = ctx.createGain();
-        monitorGain.gain.value = ui.monitorInput?.checked ? Math.min(Math.max(settings.gainValue || 1, 0.2), 1.4) : 0;
+        monitorGain.gain.value = ui.monitorInput?.checked ? Math.max(0, Number(settings.gainValue) || 1) : 0;
         source.connect(monitorGain);
         monitorGain.connect(ctx.destination);
+        await unlockAudioContext(ctx, 'mic-test-monitor-connected');
 
         const freqData = new Uint8Array(analyser.frequencyBinCount);
         const timeData = new Uint8Array(analyser.fftSize);
@@ -5073,6 +5548,7 @@
         micTestState = {
             stream,
             ctx,
+            source,
             analyser,
             freqData,
             timeData,
@@ -5151,8 +5627,28 @@
             diag('warn', 'micTest.recorder.stop.failed', { message: error?.message || String(error), reason });
         }
 
-        state.stream?.getTracks().forEach(track => track.stop());
-        state.ctx?.close?.().catch(() => {});
+        const keepMonitoring = reason !== 'modal-close'
+            && reason !== 'restart'
+            && state.ui?.monitorInput?.checked
+            && state.modalBackdrop?.isConnected;
+
+        if (keepMonitoring) {
+            try { state.source?.disconnect(state.analyser); } catch (error) {}
+            micTestMonitorRequestId++;
+            micTestMonitorState = {
+                stream: state.stream,
+                ctx: state.ctx,
+                source: state.source,
+                monitorGain: state.monitorGain,
+                modalBackdrop: state.modalBackdrop
+            };
+        } else {
+            try { state.source?.disconnect(); } catch (error) {}
+            try { state.monitorGain?.disconnect(); } catch (error) {}
+            state.stream?.getTracks().forEach(track => track.stop());
+            state.ctx?.close?.().catch(() => {});
+        }
+
         state.ui?.bars?.forEach(bar => {
             bar.style.setProperty('--h', '8%');
             bar.style.setProperty('--pulse', '1');
@@ -5161,7 +5657,7 @@
         if (state.ui?.levelText && !state.recorder) state.ui.levelText.textContent = 'Проверка остановлена.';
         if (state.ui?.startButton) state.ui.startButton.disabled = false;
         if (state.ui?.stopButton) state.ui.stopButton.disabled = true;
-        diag('info', 'micTest.stopped', { reason });
+        diag('info', 'micTest.stopped', { reason, keepMonitoring });
     }
 
     function createVoiceHints() {
@@ -5203,8 +5699,8 @@
         }
 
         counterDiv.appendChild(stat('an-stat-count', 'разговоров', String(settings.conversationCount || 0)));
-        counterDiv.appendChild(stat('an-stat-current', 'текущий', formatDuration(getCurrentConversationDuration())));
-        counterDiv.appendChild(stat('an-stat-total', 'всего', formatDuration(settings.totalConversationDuration || 0)));
+        counterDiv.appendChild(stat('an-stat-current', 'текущий', formatCurrentDuration(getCurrentConversationDuration())));
+        counterDiv.appendChild(stat('an-stat-total', 'всего', formatTotalDuration(getLiveTotalConversationDuration())));
 
         const tooltip = document.createElement('div');
         tooltip.className = 'an-tooltip';
@@ -5298,13 +5794,39 @@
             return item;
         }
         miniStats.appendChild(miniStat('an-mini-stat-count', 'разговоров', String(settings.conversationCount || 0)));
-        miniStats.appendChild(miniStat('an-mini-stat-current', 'текущий', formatDuration(getCurrentConversationDuration())));
-        miniStats.appendChild(miniStat('an-mini-stat-total', 'всего', formatDuration(settings.totalConversationDuration || 0)));
+        miniStats.appendChild(miniStat('an-mini-stat-current', 'текущий', formatCurrentDuration(getCurrentConversationDuration())));
+        miniStats.appendChild(miniStat('an-mini-stat-total', 'всего', formatTotalDuration(getLiveTotalConversationDuration())));
+
+        const miniVolume = document.createElement('label');
+        miniVolume.className = 'an-mini-volume';
+        miniVolume.setAttribute('for', 'an-mini-volume-slider');
+        const miniVolumeHeader = document.createElement('span');
+        miniVolumeHeader.className = 'an-mini-volume-header';
+        const miniVolumeTitle = document.createElement('span');
+        miniVolumeTitle.textContent = 'Громкость';
+        const miniVolumeValue = document.createElement('strong');
+        miniVolumeValue.id = 'an-mini-volume-value';
+        miniVolumeValue.textContent = `${Math.round(getSiteVolumePercent())}%`;
+        miniVolumeHeader.appendChild(miniVolumeTitle);
+        miniVolumeHeader.appendChild(miniVolumeValue);
+        const miniVolumeSlider = document.createElement('input');
+        miniVolumeSlider.id = 'an-mini-volume-slider';
+        miniVolumeSlider.type = 'range';
+        miniVolumeSlider.className = 'an-range an-mini-volume-slider';
+        miniVolumeSlider.min = '0';
+        miniVolumeSlider.max = '100';
+        miniVolumeSlider.step = '1';
+        miniVolumeSlider.value = String(getSiteVolumePercent());
+        miniVolumeSlider.setAttribute('aria-label', 'Громкость собеседника');
+        miniVolumeSlider.addEventListener('input', () => applySiteVolume(miniVolumeSlider.value, 'mini'));
+        miniVolume.appendChild(miniVolumeHeader);
+        miniVolume.appendChild(miniVolumeSlider);
 
         mini.appendChild(miniMicButton);
         mini.appendChild(miniHeadphoneButton);
         mini.appendChild(miniAutoCard);
         mini.appendChild(miniStats);
+        mini.appendChild(miniVolume);
         setTimeout(() => { updateButtonStyles(); updateStatsUI(); updateCurrentStatusUI(); }, 0);
         return mini;
     }
@@ -5450,6 +5972,7 @@
         autoCard.appendChild(autoText);
         autoCard.appendChild(autoSwitch.label);
         coreBlock.appendChild(autoCard);
+        coreBlock.appendChild(createSiteVolumeControl());
 
         const audioSettings = document.createElement('div');
         audioSettings.className = 'an-settings-list';
@@ -5460,50 +5983,13 @@
             autoVolume: 'Выравнивает громкость собеседника',
             noiseSuppression: 'Уменьшает фоновый шум',
             echoCancellation: 'Уменьшает эхо',
-            voicePitch: 'Понижает голос',
             voiceControl: 'Команды: скип, чат, завершить',
+            notificationSounds: 'Включает звуки начала и завершения разговора',
+            autoConfirmDisconnect: 'Завершает диалог одним нажатием без видимого окна подтверждения',
+            disconnectProtection: 'Разрешает два быстрых скипа в минуту, затем ждёт 5 секунд текущего разговора',
             diagnosticLogs: 'Подробные события в консоль и AutoNektomeDebug.dump()',
-            adBlock: 'Скрывает баннеры, не мешая загрузке сайта',
-            adBlockHideElements: 'Прячет рекламные места',
-            adBlockBlockNetwork: 'Блокирует рекламные вставки',
-            metricBlock: 'Отключает отправку статистики',
             metricGlobalStubs: 'Выключает счётчики после загрузки'
         };
-
-        function createNestedSetting(labelText, helperText, key, onChange) {
-            const option = document.createElement('div');
-            option.className = 'an-nested-option';
-            option.dataset.setting = key;
-
-            const text = document.createElement('div');
-            text.className = 'an-setting-text';
-
-            const title = document.createElement('div');
-            title.className = 'an-setting-title';
-            title.textContent = labelText;
-
-            const helper = document.createElement('div');
-            helper.className = 'an-setting-helper';
-            helper.textContent = helperText || '';
-
-            text.appendChild(title);
-            text.appendChild(helper);
-
-            const control = createMaterialSwitch(null, settings[key]);
-            control.input.value = key;
-            control.input.dataset.setting = key;
-            control.input.setAttribute('aria-label', labelText);
-            control.input.addEventListener('change', () => {
-                settings[key] = control.input.checked;
-                saveSetting(key, control.input.checked);
-                control.label.classList.toggle('is-enabled', control.input.checked);
-                onChange?.(control.input.checked);
-            });
-
-            option.appendChild(text);
-            option.appendChild(control.label);
-            return option;
-        }
 
         function createToggle(labelText, key) {
             const row = document.createElement('section');
@@ -5538,55 +6024,7 @@
             row.appendChild(main);
 
             let volumeContainer = null;
-            let pitchContainer = null;
-            let adBlockContainer = null;
-            let adBlockDetailsButton = null;
 
-            if (key === 'adBlock') {
-                adBlockDetailsButton = document.createElement('button');
-                adBlockDetailsButton.type = 'button';
-                adBlockDetailsButton.className = 'an-ad-details-toggle';
-                adBlockDetailsButton.setAttribute('aria-expanded', String(!!settings.adBlockDetailsExpanded));
-                adBlockDetailsButton.disabled = !settings.adBlock;
-                adBlockDetailsButton.textContent = settings.adBlockDetailsExpanded ? 'Скрыть параметры ↑' : 'Параметры ↓';
-
-                adBlockContainer = document.createElement('div');
-                adBlockContainer.className = 'an-nested an-nested-options';
-                adBlockContainer.hidden = !settings.adBlockDetailsExpanded;
-
-                adBlockDetailsButton.addEventListener('click', () => {
-                    settings.adBlockDetailsExpanded = !settings.adBlockDetailsExpanded;
-                    saveSetting('adBlockDetailsExpanded', settings.adBlockDetailsExpanded);
-                    adBlockContainer.hidden = !settings.adBlockDetailsExpanded;
-                    adBlockDetailsButton.setAttribute('aria-expanded', String(settings.adBlockDetailsExpanded));
-                    adBlockDetailsButton.textContent = settings.adBlockDetailsExpanded ? 'Скрыть параметры ↑' : 'Параметры ↓';
-                });
-
-                adBlockContainer.appendChild(createNestedSetting(
-                    'Скрывать блоки',
-                    settingHelpers.adBlockHideElements,
-                    'adBlockHideElements',
-                    () => applyAdBlock()
-                ));
-                adBlockContainer.appendChild(createNestedSetting(
-                    'Не грузить рекламу',
-                    settingHelpers.adBlockBlockNetwork,
-                    'adBlockBlockNetwork',
-                    () => applyAdBlock()
-                ));
-                adBlockContainer.appendChild(createNestedSetting(
-                    'Отключить метрики',
-                    settingHelpers.metricBlock,
-                    'metricBlock',
-                    () => applyAdBlock()
-                ));
-                adBlockContainer.appendChild(createNestedSetting(
-                    'Глушить счётчики',
-                    settingHelpers.metricGlobalStubs,
-                    'metricGlobalStubs',
-                    () => applyAdBlock()
-                ));
-            }
 
             if (key === 'enableLoopback') {
                 volumeContainer = document.createElement('div');
@@ -5620,47 +6058,33 @@
                 });
             }
 
-            if (key === 'voicePitch') {
-                pitchContainer = document.createElement('div');
-                pitchContainer.className = 'an-nested';
-                pitchContainer.hidden = !settings.voicePitch;
-
-                const rangeRow = document.createElement('label');
-                rangeRow.className = 'an-range-row';
-
-                const pitchLabel = document.createElement('span');
-                pitchLabel.className = 'an-range-label';
-                pitchLabel.textContent = `0 — обычный голос, 0.40 — очень низкий: ${settings.pitchLevel.toFixed(2)}`;
-
-                const pitchSlider = document.createElement('input');
-                pitchSlider.type = 'range';
-                pitchSlider.className = 'an-range';
-                pitchSlider.min = '0';
-                pitchSlider.max = '0.4';
-                pitchSlider.step = '0.01';
-                pitchSlider.value = settings.pitchLevel;
-
-                rangeRow.appendChild(pitchLabel);
-                rangeRow.appendChild(pitchSlider);
-                pitchContainer.appendChild(rangeRow);
-
-                pitchSlider.addEventListener('input', () => {
-                    settings.pitchLevel = parseFloat(pitchSlider.value);
-                    pitchLabel.textContent = `0 — обычный голос, 0.40 — очень низкий: ${settings.pitchLevel.toFixed(2)}`;
-                    saveSetting('pitchLevel', settings.pitchLevel);
-                    updatePitchLevel(settings.pitchLevel);
-                });
-            }
-
-            checkbox.addEventListener('change', () => {
+            const applyToggleChange = async () => {
                 settings[key] = checkbox.checked;
                 saveSetting(key, checkbox.checked);
                 control.label.classList.toggle('is-enabled', checkbox.checked);
+                control.label.setAttribute('aria-checked', String(checkbox.checked));
 
                 if (key === 'enableLoopback') {
-                    if (checkbox.checked && globalStream) enableSelfListening(globalStream);
-                    else stopSelfListening();
                     if (volumeContainer) volumeContainer.hidden = !checkbox.checked;
+
+                    if (checkbox.checked) {
+                        // AudioContext создаётся и разблокируется синхронно в обработчике
+                        // клика, до возможного ожидания разрешения на микрофон.
+                        const preferredStream = hasLiveAudioTrack(globalStream) ? globalStream : null;
+                        const preparedContext = prepareSelfListeningContext(preferredStream);
+
+                        if (checkbox.checked && settings.enableLoopback) {
+                            const started = await enableSelfListening(preferredStream, preparedContext);
+                            if (!started) {
+                                diag('warn', 'selfListening.notStarted', {
+                                    hasStream: !!preferredStream,
+                                    contextState: preparedContext?.state || null
+                                });
+                            }
+                        }
+                    } else {
+                        stopSelfListening();
+                    }
                 } else if (key === 'voiceControl') {
                     isVoiceControlEnabled = checkbox.checked;
                     if (voiceHintElement) voiceHintElement.style.display = checkbox.checked ? 'inline-flex' : 'none';
@@ -5679,68 +6103,95 @@
                     } else {
                         stopAutoVolume('setting-disabled');
                     }
-                } else if (key === 'voicePitch') {
-                    updatePitchEffect(checkbox.checked);
-                    if (pitchContainer) pitchContainer.hidden = !checkbox.checked;
-                } else if (key === 'adBlock') {
-                    if (!checkbox.checked && adBlockContainer) adBlockContainer.hidden = true;
-                    if (checkbox.checked && adBlockContainer) adBlockContainer.hidden = !settings.adBlockDetailsExpanded;
-                    if (adBlockDetailsButton) adBlockDetailsButton.disabled = !checkbox.checked;
-                    applyAdBlock();
+                } else if (key === 'disconnectProtection' && !checkbox.checked) {
+                    autoSearchPauseUntil = 0;
+                    queuedDisconnect = null;
+                    disconnectHistory = [];
+                    pendingDisconnectGuardRegistered = false;
+                    clearDisconnectIntent();
+                    saveDisconnectGuardState();
+                    updateCurrentStatusUI();
                 }
-            });
+            };
+
+            checkbox.addEventListener('change', applyToggleChange);
+
+            if (key === 'voiceControl') {
+                // У голосового управления дополнительный блок меняет высоту строки.
+                // На части браузеров нативный click вложенного checkbox из-за этого
+                // визуально срабатывал только со второго раза. Переключаем явно.
+                checkbox.style.pointerEvents = 'none';
+                checkbox.tabIndex = -1;
+                control.label.tabIndex = 0;
+                control.label.setAttribute('role', 'switch');
+                control.label.setAttribute('aria-checked', String(checkbox.checked));
+                control.label.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    checkbox.checked = !checkbox.checked;
+                    applyToggleChange();
+                });
+                control.label.addEventListener('keydown', event => {
+                    if (event.key !== 'Enter' && event.key !== ' ') return;
+                    event.preventDefault();
+                    control.label.click();
+                });
+            }
 
             if (key === 'voiceControl') row.appendChild(createVoiceControlExtras());
-            if (key === 'adBlock' && adBlockDetailsButton) row.appendChild(adBlockDetailsButton);
-            if (key === 'adBlock' && adBlockContainer) row.appendChild(adBlockContainer);
             if (key === 'enableLoopback' && volumeContainer) row.appendChild(volumeContainer);
-            if (key === 'voicePitch' && pitchContainer) row.appendChild(pitchContainer);
             return row;
         }
 
-        function createAdvancedSettingsSection() {
-            const section = document.createElement('section');
-            section.className = 'an-advanced-section';
-            section.classList.toggle('is-open', !!settings.advancedSettingsExpanded);
+        function createSiteVolumeControl() {
+            const row = document.createElement('section');
+            row.id = 'an-site-volume-fallback';
+            row.className = 'an-setting-row';
+            const text = document.createElement('div');
+            text.className = 'an-setting-text';
+            const title = document.createElement('div');
+            title.className = 'an-setting-title';
+            title.textContent = 'Громкость собеседника';
+            text.appendChild(title);
 
-            const toggle = document.createElement('button');
-            toggle.type = 'button';
-            toggle.className = 'an-advanced-toggle';
-            toggle.setAttribute('aria-expanded', String(!!settings.advancedSettingsExpanded));
-            toggle.textContent = settings.advancedSettingsExpanded ? 'Дополнительные настройки ↑' : 'Дополнительные настройки ↓';
-
-            const content = document.createElement('div');
-            content.className = 'an-advanced-content';
-            content.hidden = !settings.advancedSettingsExpanded;
-            content.appendChild(createToggle('Блокировка рекламы', 'adBlock'));
-            content.appendChild(createToggle('Диагностические логи', 'diagnosticLogs'));
-
-            toggle.addEventListener('click', () => {
-                settings.advancedSettingsExpanded = !settings.advancedSettingsExpanded;
-                saveSetting('advancedSettingsExpanded', settings.advancedSettingsExpanded);
-                content.hidden = !settings.advancedSettingsExpanded;
-                section.classList.toggle('is-open', settings.advancedSettingsExpanded);
-                toggle.setAttribute('aria-expanded', String(settings.advancedSettingsExpanded));
-                toggle.textContent = settings.advancedSettingsExpanded ? 'Дополнительные настройки ↑' : 'Дополнительные настройки ↓';
-            });
-
-            section.appendChild(toggle);
-            section.appendChild(content);
-            return section;
+            const nested = document.createElement('div');
+            nested.className = 'an-nested';
+            const rangeRow = document.createElement('label');
+            rangeRow.className = 'an-range-row';
+            const label = document.createElement('span');
+            label.className = 'an-range-label';
+            label.innerHTML = `Уровень <strong id="an-site-volume-value">${Math.round(getSiteVolumePercent())}%</strong>`;
+            const slider = document.createElement('input');
+            slider.id = 'an-site-volume-slider';
+            slider.type = 'range';
+            slider.className = 'an-range';
+            slider.min = '0';
+            slider.max = '100';
+            slider.step = '1';
+            slider.value = String(getSiteVolumePercent());
+            slider.addEventListener('input', () => applySiteVolume(slider.value, 'fallback'));
+            rangeRow.appendChild(label);
+            rangeRow.appendChild(slider);
+            nested.appendChild(rangeRow);
+            row.appendChild(text);
+            row.appendChild(nested);
+            return row;
         }
 
+        audioSettings.appendChild(createMicTestCard());
+        audioSettings.appendChild(createToggle('Голосовое управление', 'voiceControl'));
         audioSettings.appendChild(createToggle('Самопрослушивание', 'enableLoopback'));
         audioSettings.appendChild(createToggle('Автогромкость микрофона', 'autoGainControl'));
         audioSettings.appendChild(createToggle('Автогромкость собеседника', 'autoVolume'));
         audioSettings.appendChild(createToggle('Шумоподавление', 'noiseSuppression'));
         audioSettings.appendChild(createToggle('Эхоподавление', 'echoCancellation'));
-        audioSettings.appendChild(createToggle('Низкий голос', 'voicePitch'));
-        audioSettings.appendChild(createToggle('Голосовое управление', 'voiceControl'));
-        audioSettings.appendChild(createMicTestCard());
+        audioSettings.appendChild(createToggle('Звуки уведомлений', 'notificationSounds'));
+        audioSettings.appendChild(createToggle('Завершать диалог одним нажатием', 'autoConfirmDisconnect'));
+        audioSettings.appendChild(createToggle('Защита от частых отключений', 'disconnectProtection'));
+        audioSettings.appendChild(createToggle('Диагностические логи', 'diagnosticLogs'));
 
         body.appendChild(audioSettings);
         body.appendChild(createThemeSelector());
-        body.appendChild(createAdvancedSettingsSection());
 
         container.appendChild(header);
         container.appendChild(createMiniWidget());
@@ -5778,39 +6229,11 @@
 
             const audio = document.querySelector('audio#audioStream');
             if (audio && audio.srcObject && settings.autoVolume) setupAutoVolume(audio.srcObject, `dom:${reason}`);
-
-            const finishedScreen = document.querySelector('.callScreen.callFinished');
-            if (finishedScreen && isConversationActive) {
-                stopConversationTimer();
-            }
-
-            const timerElement = document.querySelector('.callScreen__time, .timer-label');
-
-            if (timerElement && timerElement.textContent === '00:00' && !conversationTimer) {
-                startConversationTimer();
-            }
-
-            if (!timerElement && conversationTimer) {
-                stopConversationTimer();
-            }
-
-            let stopButton = document.querySelector('button.callScreen__cancelCallBtn.btn.danger2.cancelCallBtnNoMess');
-            if (!stopButton) {
-                stopButton = document.querySelector('button.btn.btn-lg.stop-talk-button');
-            }
-
-            if (stopButton && !stopButton.dataset.listenerAdded) {
-                stopButton.addEventListener('click', () => {
-                    setTimeout(() => {
-                        const confirmButton = document.querySelector('button.swal2-confirm.swal2-styled');
-                        if (confirmButton && !confirmButton.dataset.listenerAdded) {
-                            confirmButton.addEventListener('click', playNotificationOnEnd);
-                            confirmButton.dataset.listenerAdded = 'true';
-                        }
-                    }, 500);
-                });
-                stopButton.dataset.listenerAdded = 'true';
-            }
+            syncVolumeControls();
+            syncConversationLifecycle(`dom:${reason}`);
+            flushQueuedDisconnect(`dom:${reason}`);
+            confirmDisconnectIfNeeded(`dom:${reason}`);
+            if (seamlessTransitionUntil && Date.now() > seamlessTransitionUntil) endSeamlessTransition();
         } catch (error) {
             diag('error', 'domMaintenance.error', { reason, message: error?.message || String(error), stack: error?.stack || null });
         } finally {
@@ -5828,12 +6251,43 @@
         domMutationBurstCount += added;
         if (pendingDomMaintenance) return;
         pendingDomMaintenance = true;
-        requestAnimationFrame(() => runDomMaintenance(reason));
+        if (document.visibilityState === 'hidden') {
+            queueMicrotask(() => runDomMaintenance(`${reason}:hidden`));
+        } else {
+            requestAnimationFrame(() => runDomMaintenance(reason));
+        }
     }
 
     function initObserver() {
         if (observer || !document.body) return;
         observer = new MutationObserver((mutations) => {
+      // AutoNektome production compatibility patch v5: ignore own settings-panel mutations.
+      mutations = mutations.filter(mutation => {
+        const rawTarget = mutation.target;
+        const target = rawTarget instanceof Element
+          ? rawTarget
+          : rawTarget?.parentElement;
+
+        if (target?.closest?.('#settings-container')) return false;
+
+        const addedNodes = Array.from(mutation.addedNodes || []);
+        if (!addedNodes.length) return true;
+
+        return addedNodes.some(node => {
+          if (!(node instanceof Element)) return true;
+          if (node.id === 'settings-container') return false;
+          if (node.closest?.('#settings-container')) return false;
+          return true;
+        });
+      });
+
+      if (!mutations.length) return;
+
+            // Критические переходы обрабатываем в microtask MutationObserver до следующей отрисовки.
+            confirmDisconnectIfNeeded('urgent-mutation');
+            if (getFinishedSearchContainer()) checkAndClickButton('urgent-finished-screen');
+            syncConversationLifecycle('urgent-mutation');
+
             let added = 0;
             let relevant = false;
             for (const mutation of mutations) {
@@ -5850,52 +6304,52 @@
         scheduleDomMaintenance('observer-start', 0);
     }
 
-    function installGetUserMediaPatch() {
-        if (isGetUserMediaPatched) return true;
-        if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') return false;
-
-        nativeGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
-
-        const patchedGetUserMedia = async function(constraints) {
-            const normalizedConstraints = normalizeMediaConstraints(constraints);
-            diag('info', 'getUserMedia.request', normalizedConstraints, { throttleMs: 500 });
-            const rawStream = await nativeGetUserMedia(normalizedConstraints);
-            diag('info', 'getUserMedia.success', {
-                audio: !!normalizedConstraints?.audio,
-                video: !!normalizedConstraints?.video,
-                tracks: rawStream?.getTracks?.().map(track => ({ kind: track.kind, id: track.id, label: track.label, readyState: track.readyState, enabled: track.enabled })) || []
-            });
-
-            if (!normalizedConstraints?.audio) return rawStream;
-            return buildOutgoingMicStream(rawStream);
-        };
-
-        patchedGetUserMedia.__autoNektomePatched = true;
-        navigator.mediaDevices.getUserMedia = patchedGetUserMedia;
-        isGetUserMediaPatched = true;
-        console.log('AutoNektome: getUserMedia audio patch установлен');
-        return true;
+    function runBackgroundMaintenance(reason = 'background') {
+        try {
+            flushQueuedDisconnect(reason);
+            confirmDisconnectIfNeeded(reason);
+            syncConversationLifecycle(reason);
+            if (isAutoModeEnabled) checkAndClickButton(reason);
+            syncVolumeControls();
+            updateStatsUI();
+            updateCurrentStatusUI();
+            if (seamlessTransitionUntil && Date.now() > seamlessTransitionUntil) endSeamlessTransition();
+        } catch (error) {
+            diag('error', 'backgroundMaintenance.error', { reason, message: error?.message || String(error) }, { throttleMs: 1500 });
+        }
     }
 
-    if (!installGetUserMediaPatch()) {
-        const mediaPatchInterval = setInterval(() => {
-            if (installGetUserMediaPatch()) clearInterval(mediaPatchInterval);
-        }, 50);
-    }
-
-    const srcObjectDescriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'srcObject');
-    if (srcObjectDescriptor?.set && !HTMLMediaElement.prototype.__autoNektomeSrcObjectPatched) {
-        Object.defineProperty(HTMLMediaElement.prototype, 'srcObject', {
-            configurable: true,
-            enumerable: srcObjectDescriptor.enumerable,
-            get: srcObjectDescriptor.get,
-            set: function(stream) {
-                srcObjectDescriptor.set.call(this, stream);
-                if (this.id === 'audioStream' && stream && settings.autoVolume) setupAutoVolume(stream, 'srcObject-setter');
-            }
+    function installResilientRuntimeHooks() {
+        if (document.documentElement.dataset.autonektomeRuntimeHooks === 'true') return;
+        document.documentElement.dataset.autonektomeRuntimeHooks = 'true';
+        document.addEventListener('click', handleDisconnectClickCapture, true);
+        ['visibilitychange', 'readystatechange'].forEach(name => document.addEventListener(name, () => runBackgroundMaintenance(name)));
+        ['focus', 'pageshow', 'hashchange', 'online'].forEach(name => window.addEventListener(name, () => runBackgroundMaintenance(name)));
+        ['playing', 'loadedmetadata', 'emptied', 'ended', 'pause'].forEach(name => {
+            document.addEventListener(name, event => {
+                if (event.target?.matches?.('audio#audioStream')) runBackgroundMaintenance(`audio:${name}`);
+            }, true);
         });
-        HTMLMediaElement.prototype.__autoNektomeSrcObjectPatched = true;
+
+        try {
+            const workerCode = `setInterval(() => postMessage(Date.now()), 750);`;
+            const workerUrl = URL.createObjectURL(new Blob([workerCode], { type: 'application/javascript' }));
+            backgroundWorker = new Worker(workerUrl);
+            URL.revokeObjectURL(workerUrl);
+            backgroundWorker.onmessage = () => runBackgroundMaintenance('worker-clock');
+            backgroundWorker.onerror = () => {
+                try { backgroundWorker?.terminate(); } catch (error) {}
+                backgroundWorker = null;
+            };
+        } catch (error) {
+            backgroundWorker = null;
+        }
+
+        backgroundFallbackTimer = setInterval(() => runBackgroundMaintenance('fallback-clock'), 1500);
+        runBackgroundMaintenance('hooks-installed');
     }
+
+    // Browser media APIs remain native for NektoMe compatibility.
 
     let isInitialized = false;
     async function init() {
@@ -5910,7 +6364,13 @@
         diag('info', 'init.start', { readyState: document.readyState, bodyChildren: document.body?.children?.length || 0 });
         ensureSiteChromePolishStyles();
         createSettingsUI();
-        applyAdBlock();
+        document.getElementById('autonektome-boot-hint')?.remove();
+        if (__autoNektomeBootHintRemoveTimer) {
+            clearTimeout(__autoNektomeBootHintRemoveTimer);
+            __autoNektomeBootHintRemoveTimer = null;
+        }
+        installResilientRuntimeHooks();
+        syncVolumeControls();
         applyTheme(settings.selectedTheme);
         applySiteChromePolish();
         diag('info', 'init.autoClickInitialSkipped', { reason: 'idle screen must stay visible' });
@@ -5927,4 +6387,326 @@
     } else {
         init();
     }
+
+  };
+
+
+  /*
+   * AutoNektome automatic-safe boot v6 clean
+   *
+   * NektoMe sends its large encrypted registration/profile packet shortly
+   * after the page opens, before the first dialog. Starting the full script at
+   * document-start changes DOM/canvas/global state before that profile is
+   * formed and can trigger the false server-side block.
+   *
+   * This controller stays passive and starts AutoNektome automatically when
+   * NektoMe's idle screen has received a real online-count update. No packet
+   * is blocked, read or modified. A conservative timeout and the previously
+   * proven post-click fallback cover layout/network variations.
+   */
+  const AUTO_BOOT_MIN_MS = 6500;
+  const AUTO_BOOT_FALLBACK_MS = 11000;
+  const CLICK_FALLBACK_MS = 1500;
+  const BOOT_HINT_VISIBLE_MS = 7500;
+
+  let __autoNektomeBooted = false;
+  let __autoNektomeBootTimer = null;
+  let __autoNektomeFallbackTimer = null;
+  let __autoNektomeObserver = null;
+  let __autoNektomeStartObserved = false;
+  let __autoNektomeBootHintTimer = null;
+  let __autoNektomeBootHintRemoveTimer = null;
+  const __autoNektomeStartedAt = performance.now();
+
+  const __hasNektoBanPopup = () => {
+    const popup = document.querySelector('.banPopup');
+    if (!popup) return false;
+    const text = popup.textContent || '';
+    return (
+      text.includes('Доступ к чатам') ||
+      text.includes('IP-адреса заблокирован') ||
+      text.includes('БАН')
+    );
+  };
+
+  const __isPeerRoute = () =>
+    /#\/peer(?:$|[/?])/i.test(location.hash || '');
+
+  const __isSearchingRoute = () =>
+    /#\/searching(?:$|[/?])/i.test(location.hash || '');
+
+  const __hasOnlineCountSignal = () => {
+    const candidates = document.querySelectorAll(
+      '.users-count-panel .talking-count, .talking-count'
+    );
+
+    return Array.from(candidates).some(element => {
+      const text = String(element.textContent || '').trim();
+      return /\d/.test(text);
+    });
+  };
+
+  const __isIdleScreenReady = () => {
+    if (__hasNektoBanPopup()) return false;
+    if (__isPeerRoute() || __isSearchingRoute()) return false;
+
+    const button = document.querySelector('#searchCompanyBtn');
+    if (!(button instanceof HTMLElement)) return false;
+    if (button.matches(':disabled, [disabled]')) return false;
+
+    const appText = String(
+      document.querySelector('#audio-chat-container')?.textContent || ''
+    );
+
+    return !/Ид[её]т загрузка|загрузка\.{2,}|подождите/i.test(appText);
+  };
+
+  const __cleanupAutoNektomeBoot = () => {
+    if (__autoNektomeBootTimer) {
+      clearTimeout(__autoNektomeBootTimer);
+      __autoNektomeBootTimer = null;
+    }
+    if (__autoNektomeFallbackTimer) {
+      clearTimeout(__autoNektomeFallbackTimer);
+      __autoNektomeFallbackTimer = null;
+    }
+    if (__autoNektomeObserver) {
+      __autoNektomeObserver.disconnect();
+      __autoNektomeObserver = null;
+    }
+    if (__autoNektomeBootHintTimer) {
+      clearTimeout(__autoNektomeBootHintTimer);
+      __autoNektomeBootHintTimer = null;
+    }
+    // Сообщение удаляется только после фактического создания панели.
+    // Если поздняя инициализация завершится ошибкой, пользователь не останется
+    // без объяснения того, почему интерфейс ещё не появился.
+
+    window.removeEventListener('hashchange', __checkAcceptedRoute);
+    document.removeEventListener(
+      'click',
+      __onFirstTrustedStart,
+      true
+    );
+  };
+
+  const __bootAutoNektome = reason => {
+    if (__autoNektomeBooted || __hasNektoBanPopup()) return false;
+
+    __autoNektomeBooted = true;
+    __cleanupAutoNektomeBoot();
+
+    setTimeout(() => {
+      if (__hasNektoBanPopup()) return;
+      try {
+        __autoNektomeLateBoot();
+        console.info('AutoNektome 5.1 запущен:', reason);
+      } catch (error) {
+        __autoNektomeBooted = false;
+        console.error('AutoNektome 5.1: ошибка позднего запуска', error);
+        __showBootHintIfNeeded();
+      }
+    }, 80);
+
+    return true;
+  };
+
+  const __scheduleBootAtMinimum = reason => {
+    if (__autoNektomeBooted || __autoNektomeBootTimer) return;
+
+    const elapsed = performance.now() - __autoNektomeStartedAt;
+    const wait = Math.max(250, AUTO_BOOT_MIN_MS - elapsed);
+
+    __autoNektomeBootTimer = setTimeout(() => {
+      __autoNektomeBootTimer = null;
+
+      if (__hasNektoBanPopup()) return;
+
+      if (
+        __hasOnlineCountSignal() ||
+        __isIdleScreenReady() ||
+        __isPeerRoute()
+      ) {
+        __bootAutoNektome(reason);
+      }
+    }, wait);
+  };
+
+  const __checkPassiveReadySignal = () => {
+    if (__autoNektomeBooted || __hasNektoBanPopup()) return;
+
+    if (__isPeerRoute()) {
+      __scheduleBootAtMinimum('accepted-peer-route');
+      return;
+    }
+
+    if (__hasOnlineCountSignal() && __isIdleScreenReady()) {
+      __scheduleBootAtMinimum('online-count-ready');
+    }
+  };
+
+  const __checkAcceptedRoute = () => {
+    if (__isPeerRoute() || __isSearchingRoute()) {
+      __autoNektomeMediaSafety.install();
+    }
+    if (__isPeerRoute()) {
+      __scheduleBootAtMinimum('peer-route-change');
+    }
+  };
+
+  const __startPassiveObserver = () => {
+    if (__autoNektomeObserver || !document.documentElement) return;
+
+    __autoNektomeObserver = new MutationObserver(
+      __checkPassiveReadySignal
+    );
+
+    __autoNektomeObserver.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ['class', 'disabled']
+    });
+
+    __checkPassiveReadySignal();
+  };
+
+  const __onFirstTrustedStart = event => {
+    if (!event.isTrusted || __autoNektomeStartObserved) return;
+
+    const origin = event.target;
+    const element = origin instanceof Element
+      ? origin
+      : origin?.parentElement;
+
+    if (!element?.closest?.('#searchCompanyBtn')) return;
+
+    // Ставим аудио-перехват в capture-фазе до обработчика сайта, чтобы
+    // зарегистрировать микрофонный поток и WebRTC sender первого диалога.
+    __autoNektomeMediaSafety.install();
+
+    __autoNektomeStartObserved = true;
+
+    if (__autoNektomeBootTimer) {
+      clearTimeout(__autoNektomeBootTimer);
+    }
+
+    __autoNektomeBootTimer = setTimeout(() => {
+      __autoNektomeBootTimer = null;
+      __bootAutoNektome('trusted-start-fallback');
+    }, CLICK_FALLBACK_MS);
+  };
+
+  window.addEventListener('hashchange', __checkAcceptedRoute);
+
+  document.addEventListener(
+    'click',
+    __onFirstTrustedStart,
+    true
+  );
+
+  const __showBootHintIfNeeded = () => {
+    if (__autoNektomeBooted || __hasNektoBanPopup() || document.getElementById('settings-container')) return;
+    if (document.getElementById('autonektome-boot-hint')) return;
+
+    const host = document.body || document.documentElement;
+    if (!host) {
+      if (!__autoNektomeBootHintTimer) {
+        __autoNektomeBootHintTimer = setTimeout(() => {
+          __autoNektomeBootHintTimer = null;
+          __showBootHintIfNeeded();
+        }, 0);
+      }
+      return;
+    }
+
+    const hint = document.createElement('div');
+    hint.id = 'autonektome-boot-hint';
+    hint.setAttribute('role', 'status');
+    hint.setAttribute('aria-live', 'polite');
+
+    const title = document.createElement('div');
+    title.textContent = 'AutoNektome 5.1 загружен';
+    Object.assign(title.style, {
+      fontWeight: '800',
+      fontSize: '14px',
+      color: '#ffffff'
+    });
+
+    const message = document.createElement('div');
+    message.textContent = 'Для безопасного запуска зайдите в первый диалог — панель появится автоматически.';
+    Object.assign(message.style, {
+      marginTop: '3px',
+      color: 'rgba(255,255,255,.82)',
+      fontWeight: '600',
+      fontSize: '12px'
+    });
+
+    hint.appendChild(title);
+    hint.appendChild(message);
+    Object.assign(hint.style, {
+      position: 'fixed',
+      left: '50%',
+      top: '14px',
+      transform: 'translateX(-50%)',
+      zIndex: '2147483647',
+      width: 'max-content',
+      maxWidth: 'min(92vw, 500px)',
+      padding: '11px 16px',
+      border: '1px solid rgba(121,192,255,.38)',
+      borderRadius: '15px',
+      background: 'linear-gradient(180deg, rgba(22,27,34,.98), rgba(13,17,23,.98))',
+      color: '#fff',
+      boxShadow: '0 10px 34px rgba(0,0,0,.46), 0 0 0 1px rgba(255,255,255,.035) inset',
+      fontFamily: 'Roboto, Segoe UI, Arial, sans-serif',
+      lineHeight: '1.3',
+      textAlign: 'center',
+      pointerEvents: 'none',
+      opacity: '1'
+    });
+    host.appendChild(hint);
+
+    __autoNektomeBootHintRemoveTimer = setTimeout(() => {
+      __autoNektomeBootHintRemoveTimer = null;
+      hint.remove();
+    }, BOOT_HINT_VISIBLE_MS);
+  };
+
+  // Показываем сообщение на document-start, а не после защитного таймаута.
+  // Если полная панель уже появилась, cleanup удалит сообщение немедленно.
+  __showBootHintIfNeeded();
+
+  const __startAutoBoot = () => {
+    __startPassiveObserver();
+    __showBootHintIfNeeded();
+
+    // Conservative automatic fallback: menu appears on the initial page even
+    // if NektoMe changes the users-count markup in a future build.
+    const elapsed = performance.now() - __autoNektomeStartedAt;
+    __autoNektomeFallbackTimer = setTimeout(() => {
+      __autoNektomeFallbackTimer = null;
+
+      if (__hasNektoBanPopup()) return;
+
+      if (
+        __isIdleScreenReady() ||
+        __isPeerRoute() ||
+        __isSearchingRoute()
+      ) {
+        __bootAutoNektome('automatic-safe-timeout');
+      }
+    }, Math.max(500, AUTO_BOOT_FALLBACK_MS - elapsed));
+  };
+
+  if (document.readyState === 'loading') {
+    document.addEventListener(
+      'DOMContentLoaded',
+      __startAutoBoot,
+      { once: true }
+    );
+  } else {
+    __startAutoBoot();
+  }
+
 })();
