@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AutoNektome
 // @namespace    http://tampermonkey.net/
-// @version      5.1.0
+// @version      5.1.1
 // @description  Автоматический переход с настройками звука, голосовым управлением и выбором тем для nekto.me audiochat.
 // @author       https://t.me/contact_developer_bot
 // @match        *://*nekto.me/audiochat*
@@ -15,6 +15,87 @@
 // ==/UserScript==
 
 (function() {
+  // Точечно глушим громкое штатное уведомление NektoMe connect.mp3.
+  // Механизм устанавливается на document-start и не затрагивает голос
+  // собеседника, audio#audioStream или пользовательские звуки AutoNektome.
+  const __autoNektomeNativeNotificationSilencer = (() => {
+    const NATIVE_NOTIFICATION_PATTERN = /(?:^|\/)connect\.mp3(?:[?#]|$)/i;
+    let observer = null;
+
+    const getAudioSource = audio => String(audio?.currentSrc || audio?.src || '');
+
+    const isNativeNotificationAudio = audio => {
+      if (!audio || audio.dataset?.custom === 'true' || audio.dataset?.autonektomeCustom === 'true') {
+        return false;
+      }
+      return NATIVE_NOTIFICATION_PATTERN.test(getAudioSource(audio));
+    };
+
+    const silenceAudio = audio => {
+      if (!isNativeNotificationAudio(audio)) return false;
+
+      try { audio.pause(); } catch (error) {}
+      try { audio.muted = true; } catch (error) {}
+      try { audio.volume = 0; } catch (error) {}
+      try { audio.removeAttribute('autoplay'); } catch (error) {}
+      try { audio.removeAttribute('preload'); } catch (error) {}
+      try { audio.dataset.autonektomeNativeNotificationBlocked = 'true'; } catch (error) {}
+      return true;
+    };
+
+    const scanNode = node => {
+      if (!node || node.nodeType !== Node.ELEMENT_NODE) return;
+      if (node.tagName === 'AUDIO') silenceAudio(node);
+      node.querySelectorAll?.('audio').forEach(silenceAudio);
+    };
+
+    const install = () => {
+      const audioPrototype = window.HTMLAudioElement?.prototype;
+      if (audioPrototype?.play && !audioPrototype.play.__autoNektomeNativeSoundWrapped) {
+        try {
+          const originalPlay = audioPrototype.play;
+          const wrappedPlay = function() {
+            if (isNativeNotificationAudio(this)) {
+              silenceAudio(this);
+              return Promise.resolve();
+            }
+            return Reflect.apply(originalPlay, this, arguments);
+          };
+          Object.defineProperty(wrappedPlay, '__autoNektomeNativeSoundWrapped', { value: true });
+          audioPrototype.play = wrappedPlay;
+        } catch (error) {}
+      }
+
+      const observeAudioElements = () => {
+        if (!document.documentElement || observer) return;
+
+        document.querySelectorAll('audio').forEach(silenceAudio);
+        observer = new MutationObserver(mutations => {
+          mutations.forEach(mutation => {
+            if (mutation.type === 'attributes') {
+              silenceAudio(mutation.target);
+              return;
+            }
+            mutation.addedNodes.forEach(scanNode);
+          });
+        });
+        observer.observe(document.documentElement, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ['src']
+        });
+      };
+
+      if (document.documentElement) observeAudioElements();
+      else document.addEventListener('DOMContentLoaded', observeAudioElements, { once: true });
+    };
+
+    return { install, silenceAudio };
+  })();
+
+  __autoNektomeNativeNotificationSilencer.install();
+
   // Реестр фактических аудиотреков, которые могут быть переданы собеседнику.
   // Устанавливается при запуске панели или непосредственно перед первым поиском,
   // чтобы кнопка микрофона управляла не только внутренним потоком AutoNektome,
@@ -240,7 +321,7 @@
 
     __autoNektomeMediaSafety.install();
 
-    const SCRIPT_VERSION = '5.1.0';
+    const SCRIPT_VERSION = '5.1.1';
 
     // ### Настройка звуков уведомлений
     const START_CONVERSATION_SOUND_URL = 'https://zvukogram.com/mp3/22/skype-sound-message-received-message-received.mp3';
@@ -608,13 +689,13 @@
 
     // ### Утилиты
     const endConversationAudio = new Audio(END_CONVERSATION_SOUND_URL);
+    endConversationAudio.dataset.custom = 'true';
+    endConversationAudio.dataset.autonektomeCustom = 'true';
     endConversationAudio.volume = END_SOUND_VOLUME;
     const startConversationAudio = new Audio(START_CONVERSATION_SOUND_URL);
+    startConversationAudio.dataset.custom = 'true';
+    startConversationAudio.dataset.autonektomeCustom = 'true';
     startConversationAudio.volume = START_SOUND_VOLUME;
-
-  // AutoNektome safe-core compatibility patch v3: штатное аудио NektoMe не изменяется.
-  // Не вызываем pause(), не очищаем src, не ставим muted и не патчим play().
-
 
 
     function loadSetting(key, defaultValue, transform = JSON.parse) {
@@ -3732,7 +3813,7 @@
 
 
 
-            /* Visual polish v5.1.0: compact professional core bar + quiet ad block */
+            /* Visual polish v5.1: compact professional core bar + quiet ad block */
             #settings-container {
                 container-type: inline-size;
                 border-radius: 18px;
