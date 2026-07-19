@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         AutoNektome
 // @namespace    http://tampermonkey.net/
-// @version      5.1
+// @version      5.1.0
 // @description  Автоматический переход с настройками звука, голосовым управлением и выбором тем для nekto.me audiochat.
-// @author       @paracosm17
+// @author       https://t.me/contact_developer_bot
 // @match        *://*nekto.me/audiochat*
 // @run-at       document-start
 // @grant        none
@@ -240,7 +240,7 @@
 
     __autoNektomeMediaSafety.install();
 
-    const SCRIPT_VERSION = '5.1';
+    const SCRIPT_VERSION = '5.1.0';
 
     // ### Настройка звуков уведомлений
     const START_CONVERSATION_SOUND_URL = 'https://zvukogram.com/mp3/22/skype-sound-message-received-message-received.mp3';
@@ -3732,7 +3732,7 @@
 
 
 
-            /* Visual polish v5.1: compact professional core bar + quiet ad block */
+            /* Visual polish v5.1.0: compact professional core bar + quiet ad block */
             #settings-container {
                 container-type: inline-size;
                 border-radius: 18px;

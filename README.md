@@ -1,10 +1,10 @@
 # AutoNektome 🚀
 
-![Версия](https://img.shields.io/badge/версия-5.1-brightgreen) ![Лицензия](https://img.shields.io/badge/лицензия-MIT-blue) ![Совместимость](https://img.shields.io/badge/сайт-nekto.me/audiochat-orange)
+![Версия](https://img.shields.io/badge/версия-5.1.0-brightgreen) ![Лицензия](https://img.shields.io/badge/лицензия-MIT-blue) ![Совместимость](https://img.shields.io/badge/сайт-nekto.me/audiochat-orange)
 
 **AutoNektome** — пользовательский скрипт для [nekto.me/audiochat](https://nekto.me/audiochat), который автоматизирует поиск собеседников, добавляет голосовое управление, надёжные таймеры и статистику, настройки микрофона и громкости, проверку микрофона и кастомизацию интерфейса в одном удобном меню.
 
-## 🆕 Что нового в 5.1
+## 🆕 Что нового в 5.1.0
 
 - ⏱️ **Надёжные таймеры и статистика:** исправлен текущий таймер диалога, учёт быстрых смен собеседников и живое обновление общего времени общения.
 - 🔄 **Фоновый автопоиск:** критические проверки продолжают работать в неактивной вкладке благодаря фоновому heartbeat и синхронизации состояния.
@@ -96,7 +96,7 @@ const DEFAULT_VOICE_COMMANDS = {
 ## 🔧 Технические детали
 
 - Совместимость: [https://nekto.me/audiochat](https://nekto.me/audiochat).
-- Версия скрипта: `5.1`.
+- Версия скрипта: `5.1.0`.
 - Технологии: JavaScript, Web Audio API, Web Speech API (`webkitSpeechRecognition`), WebRTC, MediaRecorder, MutationObserver и Web Worker.
 - Темы сайта: CSS-файлы загружаются из папки `/themes` репозитория проекта; при сетевой ошибке используются встроенные резервные стили и кеш.
 - Хранение: настройки и статистика сохраняются в `localStorage`, состояние защиты быстрых завершений — в `sessionStorage`.
